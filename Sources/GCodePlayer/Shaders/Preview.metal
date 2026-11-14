@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 struct Instance { float4 a,b,color,timing; };
-struct Uniforms { float4x4 vp,lightVP; float4 head,eye,clock; };
+struct Uniforms { float4x4 vp,lightVP; float4 head,eye,clock,filament; };
 struct Out { float4 position [[position]]; float3 world,normal; float4 color; float kind,heat; float4 lightPosition; };
 vertex Out bead(uint vid [[vertex_id]],uint instance [[instance_id]],constant Instance *segments [[buffer(0)]],constant Uniforms &u [[buffer(1)]]) {
     Instance s=segments[instance];
@@ -43,6 +43,12 @@ vertex Out bead(uint vid [[vertex_id]],uint instance [[instance_id]],constant In
     }
     return {u.vp*float4(world,1),world,normal,s.color,s.timing.w,heat,u.lightVP*float4(world,1)};
 }
+struct HeadVertex {float4 position,normal,color;};
+vertex Out toolhead(uint vid [[vertex_id]],constant HeadVertex *mesh [[buffer(0)]],constant Uniforms &u [[buffer(1)]]) {
+    HeadVertex value=mesh[vid];float3 world=value.position.xyz+u.head.xyz;
+    float4 color=value.color.a<0?u.filament:value.color;
+    return {u.vp*float4(world,1),world,value.normal.xyz,color,2,0,u.lightVP*float4(world,1)};
+}
 // Screen-facing elliptical ribbon: two triangles for distant beads instead of
 // generating the complete tube. Lighting normals retain a rounded appearance.
 vertex Out ribbon(uint vid [[vertex_id]],uint instance [[instance_id]],constant Instance *segments [[buffer(0)]],constant Uniforms &u [[buffer(1)]]) {
@@ -66,7 +72,7 @@ fragment float4 shaded(Out in [[stage_in]],constant Uniforms &u [[buffer(1)]],de
         float3 p=in.lightPosition.xyz/in.lightPosition.w;float2 uv=float2(p.x*.5+.5,.5-p.y*.5);
         constexpr sampler shadowSampler(coord::normalized,filter::linear,compare_func::less_equal,address::clamp_to_edge);
         if(all(uv>0.f)&&all(uv<1.f)&&p.z>0&&p.z<1){
-            float bias=max(.00025f,.001f*(1-dot(n,l)));visibility=0;
+            float texelScale=1024.f/float(shadowMap.get_width());float bias=max(.00012f,.0007f*(1-dot(n,l)))*texelScale;visibility=0;
             if(u.head.w<.75) visibility=shadowMap.sample_compare(shadowSampler,uv,p.z-bias);
             else for(int x=-1;x<=1;x++)for(int y=-1;y<=1;y++)visibility+=shadowMap.sample_compare(shadowSampler,uv+float2(x,y)/float2(shadowMap.get_width(),shadowMap.get_height()),p.z-bias)/9.f;
             visibility=mix(.35f,1.f,visibility);

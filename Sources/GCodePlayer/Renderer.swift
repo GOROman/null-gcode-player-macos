@@ -5,11 +5,12 @@ import simd
 struct GPUInstance { var a, b, color, timing: SIMD4<Float> }
 private struct Uniforms {
   var vp, lightVP: simd_float4x4
-  var head, eye, clock: SIMD4<Float>
+  var head, eye, clock, filament: SIMD4<Float>
 }
 final class Renderer: NSObject, MTKViewDelegate {
   let player: Player, device: MTLDevice, queue: MTLCommandQueue, pipeline: MTLRenderPipelineState,
     transparentPipeline: MTLRenderPipelineState, ribbonPipeline: MTLRenderPipelineState,
+    headPipeline: MTLRenderPipelineState, transparentHeadPipeline: MTLRenderPipelineState,
     depth: MTLDepthStencilState,
     transparentDepth: MTLDepthStencilState
   let inFlight = DispatchSemaphore(value: 3)
@@ -19,7 +20,10 @@ final class Renderer: NSObject, MTKViewDelegate {
   var quality = AdaptiveRenderQuality(), movingUntil = 0.0, previousEye = SIMD3<Float>.zero,
     previousTarget = SIMD3<Float>.zero, lastShadowWall = -Double.infinity, shadowWasMoving = false
   var lowShadowTexture: MTLTexture!
-  var beads: MTLBuffer?, plate: MTLBuffer?, head: MTLBuffer?, headCount = 0, times = [Double](),
+  var headShadowPipeline: MTLRenderPipelineState!
+  var opaqueHead: MTLBuffer?, transparentHead: MTLBuffer?, opaqueHeadCount = 0,
+    transparentHeadCount = 0
+  var beads: MTLBuffer?, plate: MTLBuffer?, times = [Double](),
     starts = [Double]()
   var yaw: Float = 0.65, pitch: Float = 0.7, distance: Float = 400,
     target = SIMD3<Float>(128, 0, -128)
@@ -52,6 +56,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     descriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
     descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
     transparentPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+    descriptor.vertexFunction = library.makeFunction(name: "toolhead")
+    transparentHeadPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+    descriptor.colorAttachments[0].isBlendingEnabled = false
+    headPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
     let depthDescriptor = MTLDepthStencilDescriptor()
     depthDescriptor.depthCompareFunction = .lessEqual
     depthDescriptor.isDepthWriteEnabled = true
@@ -62,16 +70,27 @@ final class Renderer: NSObject, MTKViewDelegate {
     shadowDescriptor.vertexFunction = library.makeFunction(name: "bead")
     shadowDescriptor.depthAttachmentPixelFormat = .depth32Float
     shadowPipeline = try device.makeRenderPipelineState(descriptor: shadowDescriptor)
+    shadowDescriptor.vertexFunction = library.makeFunction(name: "toolhead")
+    headShadowPipeline = try device.makeRenderPipelineState(descriptor: shadowDescriptor)
     let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-      pixelFormat: .depth32Float, width: 1024, height: 1024, mipmapped: false)
+      pixelFormat: .depth32Float, width: 2048, height: 2048, mipmapped: false)
     textureDescriptor.usage = [.renderTarget, .shaderRead]
     textureDescriptor.storageMode = .private
     shadowTexture = device.makeTexture(descriptor: textureDescriptor)!
-    textureDescriptor.width = 512
-    textureDescriptor.height = 512
+    textureDescriptor.width = 1024
+    textureDescriptor.height = 1024
     lowShadowTexture = device.makeTexture(descriptor: textureDescriptor)!
     super.init()
     player.discoverGPU(device.name)
+    let mesh = H3CHeadMesh()
+    opaqueHeadCount = mesh.opaque.count
+    transparentHeadCount = mesh.transparent.count
+    opaqueHead = mesh.opaque.withUnsafeBytes {
+      device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)
+    }
+    transparentHead = mesh.transparent.withUnsafeBytes {
+      device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)
+    }
   }
   private func buffer(_ instances: [GPUInstance]) -> MTLBuffer? {
     guard !instances.isEmpty else { return nil }
@@ -166,19 +185,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         a: SIMD4(bed.x, -1, center.z, depth), b: SIMD4(bed.z, -1, center.z, 1.5),
         color: SIMD4(0.002, 0.003, 0.004, 1), timing: SIMD4(0, 0, 0, 1))
     ])
-    var pieces = [GPUInstance]()
-    func piece(_ y: Float, _ z: Float, _ w: Float, _ h: Float, _ d: Float, _ color: SIMD4<Float>) {
-      pieces.append(
-        GPUInstance(
-          a: SIMD4(-w / 2, y, z, d), b: SIMD4(w / 2, y, z, h), color: color,
-          timing: SIMD4(0, 0, 0, 2)))
-    }
-    piece(35, 0, 21, 48, 16, SIMD4(0.13, 0.16, 0.17, 0.25))
-    piece(12, 0, 12, 12, 11, SIMD4(0.025, 0.03, 0.035, 0.65))
-    piece(5, 0, 5, 4, 5, SIMD4(0.27, 0.17, 0.04, 0.85))
-    piece(1.4, 0, 1.3, 2.8, 1.3, SIMD4(0.45, 0.3, 0.08, 1))
-    head = buffer(pieces)
-    headCount = pieces.count
     if low.x.isFinite {
       target = (low + high) / 2
       distance = max(100, simd_length(high - low) * 1.65)
@@ -186,12 +192,27 @@ final class Renderer: NSObject, MTKViewDelegate {
       target = center
       distance = max(width, depth) * 1.7
     }
-    let lightCenter = SIMD3(center.x, max(0, (high.y.isFinite ? high.y : 0)) / 2, center.z)
-    let lightDistance = max(width, depth) * 2
-    shadowVP =
-      orthographic(max(width, depth) * 0.85, 0.1, lightDistance * 3)
-      * lookAt(
-        lightCenter + simd_normalize(SIMD3<Float>(-0.4, 1, 0.5)) * lightDistance, lightCenter)
+    // Fit all receiver/caster bounds tightly in light space. The nozzle outlet
+    // and frame remain included even at the highest printed layer.
+    let sceneLow = simd_min(low, SIMD3(bed.x, -2, -bed.w)) - SIMD3<Float>(34, 0, 34)
+    let sceneHigh = simd_max(high, SIMD3(bed.z, 0, -bed.y)) + SIMD3<Float>(34, 90, 34)
+    let lightCenter = (sceneLow + sceneHigh) / 2
+    let lightDistance = max(width, depth) * 3 + sceneHigh.y
+    let lightView = lookAt(
+      lightCenter + simd_normalize(SIMD3<Float>(-0.4, 1, 0.5)) * lightDistance, lightCenter)
+    var lightLow = SIMD3<Float>(repeating: .infinity)
+    var lightHigh = SIMD3<Float>(repeating: -.infinity)
+    for x in [sceneLow.x, sceneHigh.x] {
+      for y in [sceneLow.y, sceneHigh.y] {
+        for z in [sceneLow.z, sceneHigh.z] {
+          let p = lightView * SIMD4(x, y, z, 1)
+          let v = SIMD3(p.x, p.y, p.z)
+          lightLow = simd_min(lightLow, v)
+          lightHigh = simd_max(lightHigh, v)
+        }
+      }
+    }
+    shadowVP = shadowOrthographic(lightLow, lightHigh) * lightView
     lastShadowTime = -Double.infinity
     lastShadowWall = -Double.infinity
     quality = AdaptiveRenderQuality()
@@ -202,6 +223,15 @@ final class Renderer: NSObject, MTKViewDelegate {
     if CommandLine.arguments.contains("--benchmark") {
       player.seek(file.duration)
       viewReport(file, starts.count)
+    }
+    if CommandLine.arguments.contains("--head-preview"),
+      let move = file.moves.first(where: { $0.deposit })
+    {
+      player.seek(move.start)
+      target = move.a + SIMD3<Float>(0, 39, 0)
+      distance = 150
+      yaw = 0.5
+      pitch = 0.16
     }
   }
   func viewReport(_ file: PrintFile, _ count: Int) {
@@ -216,6 +246,18 @@ final class Renderer: NSObject, MTKViewDelegate {
       let bed = file.bed
       distance = max(150, max(bed.z - bed.x, bed.w - bed.y) * 1.4)
     }
+  }
+  func setShadowResolution(_ size: Int) {
+    let size = [1024, 2048, 4096].contains(size) ? size : 2048
+    let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+      pixelFormat: .depth32Float, width: size, height: size, mipmapped: false)
+    descriptor.usage = [.renderTarget, .shaderRead]
+    descriptor.storageMode = .private
+    shadowTexture = device.makeTexture(descriptor: descriptor)
+    descriptor.width = size / 2
+    descriptor.height = size / 2
+    lowShadowTexture = device.makeTexture(descriptor: descriptor)
+    lastShadowTime = -.infinity
   }
   func top() { pitch = 1.56 }
   func pan(_ x: Float, _ y: Float) {
@@ -252,11 +294,13 @@ final class Renderer: NSObject, MTKViewDelegate {
     let shadowChanged = moving != shadowWasMoving
     shadowWasMoving = moving
     var headPosition = SIMD3<Float>(0, 0, 0)
+    var filamentColor = SIMD4<Float>(0.38, 0.87, 0.76, 1)
     if let file = player.file {
       let move = file.moves[file.index(at: player.clock)]
       let t = Float(
         max(0, min(1, (player.clock - move.start) / max(0.000001, move.end - move.start))))
       headPosition = simd_mix(move.a, move.b, SIMD3(repeating: t))
+      filamentColor = file.filamentColor(tool: move.tool)
     }
     var uniforms = Uniforms(
       vp: perspective(
@@ -264,7 +308,8 @@ final class Renderer: NSObject, MTKViewDelegate {
       ) * lookAt(eye, target), lightVP: shadowVP,
       head: SIMD4(headPosition, player.shadows ? (moving ? 0.5 : 1) : 0),
       eye: SIMD4(eye, 1),
-      clock: SIMD4(Float(player.clock), Float(player.speed), player.melt ? 1 : 0, 0))
+      clock: SIMD4(Float(player.clock), Float(player.speed), player.melt ? 1 : 0, 0),
+      filament: filamentColor)
     var visibleCount = 0
     var hi = starts.count
     while visibleCount < hi {
@@ -292,7 +337,7 @@ final class Renderer: NSObject, MTKViewDelegate {
       if let shadowEncoder = command.makeRenderCommandEncoder(descriptor: shadowPass) {
         var shadowUniforms = uniforms
         shadowUniforms.vp = shadowVP
-        shadowUniforms.clock.w = 1
+        shadowUniforms.clock.w = moving || lod ? 1 : 0
         shadowEncoder.setRenderPipelineState(shadowPipeline)
         shadowEncoder.setDepthStencilState(depth)
         shadowEncoder.setVertexBytes(
@@ -300,15 +345,21 @@ final class Renderer: NSObject, MTKViewDelegate {
         if let beads, visibleCount > 0 {
           shadowEncoder.setVertexBuffer(beads, offset: 0, index: 0)
           shadowEncoder.drawPrimitives(
-            type: .triangle, vertexStart: 0, vertexCount: 12, instanceCount: visibleCount)
+            type: .triangle, vertexStart: 0, vertexCount: moving || lod ? 12 : 60,
+            instanceCount: visibleCount)
         }
-        if let head, player.file != nil {
-          shadowEncoder.setVertexBuffer(head, offset: 0, index: 0)
-          shadowUniforms.clock.w = 0
-          shadowEncoder.setVertexBytes(
-            &shadowUniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
-          shadowEncoder.drawPrimitives(
-            type: .triangle, vertexStart: 0, vertexCount: 60, instanceCount: headCount)
+        if player.file != nil {
+          shadowEncoder.setRenderPipelineState(headShadowPipeline)
+          if let opaqueHead {
+            shadowEncoder.setVertexBuffer(opaqueHead, offset: 0, index: 0)
+            shadowEncoder.drawPrimitives(
+              type: .triangle, vertexStart: 0, vertexCount: opaqueHeadCount)
+          }
+          if let transparentHead {
+            shadowEncoder.setVertexBuffer(transparentHead, offset: 0, index: 0)
+            shadowEncoder.drawPrimitives(
+              type: .triangle, vertexStart: 0, vertexCount: transparentHeadCount)
+          }
         }
         shadowEncoder.endEncoding()
         lastShadowTime = player.clock
@@ -346,16 +397,21 @@ final class Renderer: NSObject, MTKViewDelegate {
         submittedVertices += beadVertexCount * range.count
       }
     }
-    if let head, player.file != nil {
-      var solid = uniforms
-      solid.clock.w = 0
-      encoder.setVertexBytes(&solid, length: MemoryLayout<Uniforms>.stride, index: 1)
-      encoder.setRenderPipelineState(transparentPipeline)
-      encoder.setDepthStencilState(transparentDepth)
-      encoder.setVertexBuffer(head, offset: 0, index: 0)
-      encoder.drawPrimitives(
-        type: .triangle, vertexStart: 0, vertexCount: 60, instanceCount: headCount)
-      submittedVertices += 60 * headCount
+    if player.file != nil {
+      encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
+      if let opaqueHead {
+        encoder.setRenderPipelineState(headPipeline)
+        encoder.setVertexBuffer(opaqueHead, offset: 0, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: opaqueHeadCount)
+        submittedVertices += opaqueHeadCount
+      }
+      if let transparentHead {
+        encoder.setRenderPipelineState(transparentHeadPipeline)
+        encoder.setDepthStencilState(transparentDepth)
+        encoder.setVertexBuffer(transparentHead, offset: 0, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: transparentHeadCount)
+        submittedVertices += transparentHeadCount
+      }
     }
     encoder.endEncoding()
     let benchmark = CommandLine.arguments.contains("--benchmark") && player.file != nil
@@ -416,4 +472,14 @@ private func orthographic(_ half: Float, _ near: Float, _ far: Float) -> simd_fl
   simd_float4x4(
     SIMD4(1 / half, 0, 0, 0), SIMD4(0, 1 / half, 0, 0), SIMD4(0, 0, 1 / (near - far), 0),
     SIMD4(0, 0, near / (near - far), 1))
+}
+
+private func shadowOrthographic(_ low: SIMD3<Float>, _ high: SIMD3<Float>) -> simd_float4x4 {
+  let near = -high.z
+  let far = -low.z
+  let w = max(1, high.x - low.x)
+  let h = max(1, high.y - low.y)
+  return simd_float4x4(
+    SIMD4(2 / w, 0, 0, 0), SIMD4(0, 2 / h, 0, 0), SIMD4(0, 0, 1 / (near - far), 0),
+    SIMD4(-(high.x + low.x) / w, -(high.y + low.y) / h, near / (near - far), 1))
 }

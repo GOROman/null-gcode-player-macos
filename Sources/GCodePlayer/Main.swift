@@ -7,6 +7,7 @@ struct NullGCodePlayer: App {
   var body: some Scene {
     WindowGroup("NULL — G-Code Player / Metal") {
       ContentView(player: player).onAppear {
+        if CommandLine.arguments.contains("--show-code") { player.showCode = true }
         if let arg = CommandLine.arguments.dropFirst().first {
           player.load(URL(fileURLWithPath: arg))
         }

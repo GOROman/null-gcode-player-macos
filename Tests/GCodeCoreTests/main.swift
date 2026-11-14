@@ -129,6 +129,46 @@ do {
     precondition(file.toolChanges(at: 3) == 2 && file.toolChanges(at: file.duration) == 2)
     precondition(file.toolChanges(at: 0.5) == 0)
   }
+  try check("Spool consumption interpolates by tool and does not count unretraction twice") {
+    let file = try GCodeParser.parse(
+      "G90\nM83\nG1 X0 Z.2\nG1 X10 E2 F600\nG1 E-1\nG1 E1\nT1\nG1 X20 E3\nT0\nG1 X30 E1")
+    equal(file.filamentUsage.millimeters(tool: 0, at: 0.5), 1)
+    equal(file.filamentUsage.millimeters(tool: 0, at: 2.5), 2.5)
+    equal(file.filamentUsage.millimeters(tool: 1, at: 1.5), 1.5)
+    equal(file.filamentUsage.millimeters(tool: 0, at: file.duration), 3)
+    equal(file.filamentUsage.millimeters(tool: 1, at: file.duration), 3)
+    equal(file.filamentUsage.millimeters(tool: 0, at: 0.25), 0.5)
+    equal(FilamentUsage.rotationDegrees(millimeters: 2 * .pi * 90), 360)
+  }
+  try check("Spool usage handles absolute E, G92, inch units and tessellated arcs") {
+    let absolute = try GCodeParser.parse(
+      "G90\nM82\nG1 X0 Z.2\nG1 X10 E2 F600\nG1 X20 E4\nG92 E0\nG1 X30 E2")
+    equal(absolute.filamentUsage.millimeters(tool: 0, at: absolute.duration), 6)
+    let inches = try GCodeParser.parse("G20\nM83\nG1 X1 E.1 F60")
+    equal(inches.filamentUsage.millimeters(tool: 0, at: inches.duration), 2.54)
+    let arc = try GCodeParser.parse("G90\nM83\nG1 X10 Z.2\nG2 X10 Y0 I-10 J0 E10 F600")
+    equal(arc.filamentUsage.millimeters(tool: 0, at: arc.duration), 10)
+    equal(arc.filamentUsage.millimeters(tool: 0, at: arc.duration / 2), 5)
+  }
+  check("H3C mesh has finite geometry, an outlet at the origin and separate transparent parts") {
+    let mesh = H3CHeadMesh()
+    precondition(!mesh.opaque.isEmpty && !mesh.transparent.isEmpty)
+    precondition(MemoryLayout<HeadVertex>.stride == 48)
+    precondition(mesh.opaque.count % 3 == 0 && mesh.transparent.count % 3 == 0)
+    let vertices = mesh.opaque + mesh.transparent
+    precondition(vertices.count < 50000)
+    for vertex in vertices {
+      precondition(
+        vertex.position.x.isFinite && vertex.position.y.isFinite && vertex.position.z.isFinite)
+      equal(Double(simd_length(SIMD3(vertex.normal.x, vertex.normal.y, vertex.normal.z))), 1)
+      precondition(vertex.position.y >= (-0.001) && vertex.position.y <= 88)
+    }
+    precondition(
+      vertices.contains {
+        $0.position.y < 0.01 && abs($0.position.x) < 0.21 && abs($0.position.z) < 0.21
+      })
+    precondition(mesh.opaque.contains { $0.color.w < 0 })
+  }
   if let path = CommandLine.arguments.dropFirst().first {
     try check("Metal shader compiles on the real GPU") {
       guard let device = MTLCreateSystemDefaultDevice() else {
@@ -138,7 +178,7 @@ do {
         source: String(contentsOfFile: path, encoding: .utf8), options: nil)
       precondition(
         lib.makeFunction(name: "bead") != nil && lib.makeFunction(name: "shaded") != nil
-          && lib.makeFunction(name: "ribbon") != nil)
+          && lib.makeFunction(name: "ribbon") != nil && lib.makeFunction(name: "toolhead") != nil)
     }
   }
   print("\(count) checks passed")

@@ -13,6 +13,7 @@ public struct PrintFile: Sendable {
   public var duration: Double { moves.last?.end ?? 0 }
   public var usedTools: [Int]
   public var toolChangeTimes: [Double]
+  public var filamentUsage: FilamentUsage
   public func toolChanges(at time: Double) -> Int {
     var lo = 0
     var hi = toolChangeTimes.count
@@ -106,6 +107,8 @@ public enum GCodeParser {
     var colors = [SIMD4<Float>(0.38, 0.87, 0.76, 1)]
     var bed = SIMD4<Float>(0, 0, 256, 256)
     var changes = 0
+    var usage = FilamentUsage()
+    var retractDebt = [Int: Double]()
     var previousTool: Int?
     var changeTimes = [Double]()
     var pendingToolTime: Double?
@@ -249,6 +252,11 @@ public enum GCodeParser {
         ne - e > 0.000001
         && (hypot(nx - x, ny - y) > 0.000001
           || ((command == 2 || command == 3) && (p[8] != nil || p[9] != nil)))
+      let extrusionDelta = ne - e
+      let debt = retractDebt[tool] ?? 0
+      let used = max(0, extrusionDelta - debt)
+      retractDebt[tool] = max(0, debt - extrusionDelta)
+      let motionStart = clock
       if !explicit && deposit && (layer < 0 || nz > lastPrintZ + 0.001) {
         layer += 1
         lastPrintZ = nz
@@ -297,6 +305,7 @@ public enum GCodeParser {
       } else {
         append(SIMD3(x, y, z), SIMD3(nx, ny, nz), deposit, line)
       }
+      if deposit { usage.append(tool: tool, start: motionStart, end: clock, millimeters: used) }
       x = nx
       y = ny
       z = nz
@@ -307,7 +316,7 @@ public enum GCodeParser {
       name: name, lines: lines, moves: moves, colors: colors.isEmpty ? [color("#62dec2")] : colors,
       bed: bed, layerCount: layer + 1, toolChanges: changes,
       usedTools: Array(Set(moves.filter { $0.deposit }.map { $0.tool })).sorted(),
-      toolChangeTimes: changeTimes)
+      toolChangeTimes: changeTimes, filamentUsage: usage)
   }
   public static func color(_ hex: String) -> SIMD4<Float> {
     let text = hex.trimmingCharacters(in: CharacterSet(charactersIn: "# "))

@@ -24,13 +24,21 @@ Choose **Open**, press **⌘O**, or drop a `.gcode`, `.gco`, `.gc`, sliced `.3mf
 - Play / pause: **Space**. Playback speeds: **×1, ×5, ×10, ×25, ×50, ×100**.
 - Step to the next motion: **Right arrow**. Drag the timeline to seek; restart returns to zero.
 - Drag to orbit; scroll to zoom; right-drag to pan. **Top** and **Fit** reposition the camera. **F** toggles fullscreen.
-- **G-Code** shows a faint green live source overlay.
+- **G-Code** shows a readable green live source overlay with a brighter current line. The charcoal interface uses custom playback controls, a draggable timeline, compact telemetry, and filament spool cards.
 - **Melt** changes the bead profile, adds fresh-material gloss, and leaves adjacent beads and layers overlapping as they cool. This is a visual approximation of deposition and fusion, not a thermal or fluid solver or a boolean mesh union. Filament remains individually instanced on the GPU.
-- **Shadows** enables a directional shadow map with filtered edges. Lighting includes a key light, ambient fill, rim lighting, and specular highlights.
-- Filament colors come from Bambu Studio's `filament_colour` / `filament_color` metadata and `T` tool commands. A tool strip shows each used filament and highlights the active tool. **TOOL CHANGES** shows the current and total logical change counts, including when seeking backward or forward; switches without subsequent extrusion are consolidated. Unknown tool colors use a fallback, without wrapping into another tool's color.
+- **Lighting** contains the shadow toggle and 1K / 2K / 4K shadow-map settings. The default paused map is 2048²; moving views use half the selected size. Light-space bounds fit the model, plate, and head, with texel-scaled depth bias. Lighting includes a key light, ambient fill, rim lighting, and specular highlights.
+- Filament colors come from Bambu Studio's `filament_colour` / `filament_color` metadata and `T` tool commands. Filament spool cards show each used material and highlight the active tool. Spokes rotate proportionally to cumulative G-Code extrusion, with meters used per tool. Consumption follows relative/absolute E, inch units, G92, arcs, pause and seeking; unretraction is not counted twice. The rotation uses a nominal 90 mm winding radius and does not estimate remaining spool mass. Extruder-only purge commands outside timed motion are not included. **TOOL CHANGES** shows the current and total logical change counts, including when seeking backward or forward; switches without subsequent extrusion are consolidated. Unknown tool colors use a fallback, without wrapping into another tool's color.
 - The upper right shows the actual Metal device, the GPU core count reported by macOS, available CPU cores, preparation workers, FPS, GPU command time, triangle count (**POLYGONS**), and submitted vertex count (**VERTICES**). Geometry counts include the plate and head, follow playback and distance-based detail changes, and exclude shadow-pass redraws. Vertex count reflects shader invocations rather than unique mesh positions. An unavailable GPU core count is shown as `—`; it is not guessed from the chip name. Core count indicates hardware capacity, not measured utilization.
 
 The parser handles absolute/relative XYZ and extrusion, G92, millimeters/inches, tool commands, Bambu layer/width/height comments, XY G2/G3 arcs (I/J or R), and full circles. Non-XY arcs currently fall back to straight moves. The preview clock uses commanded feedrates, without firmware acceleration, heating, or dwell estimates.
+
+## H3C-style toolhead
+
+The head is a lightweight procedural Metal mesh: open translucent carriage frame, dark detachable PrintTool, orange latch surround, contact pads, cooling fins, side fan, silicone sock, polished shoulder, and a fine nozzle tip. The inlet filament takes the active tool color. Opaque metal and translucent parts are rendered separately and cast shadows.
+
+The shape uses the supplied PrintTool photograph and the web player's documented H3C calibration as visual references. It is an approximation, not manufacturer CAD. The nozzle outlet stays at the toolpath position. See the [Bambu PrintTool product page](https://us.store.bambulab.com/products/0-4mm-printtool-h3c) for the actual hardware.
+
+For a close view, launch with a sample path followed by `--head-preview`. Add `--show-code` to initially display the live source overlay.
 
 ## Performance design
 
@@ -43,7 +51,7 @@ The parser handles absolute/relative XYZ and extrusion, G92, millimeters/inches,
 - Opaque plate and filament rendering disables alpha blending so Apple GPUs can reject hidden fragments before shading. Only the translucent head uses blending.
 - Conservative bounds for blocks of 256 runs allow CPU frustum culling. Adjacent visible blocks are submitted as a single range; when the whole model is in view, the single-draw fast path is retained. Offscreen geometry can still cast shadows.
 - Continuous collinear extrusion moves with the same tool, layer, dimensions, and feedrate are compacted into one GPU run. Travel moves, corners, speed changes and material boundaries prevent merging. Original source motion stays intact for playback, head movement and Step. This does not replace arbitrary cooled layers with a new surface or discard internal geometry.
-- During playback or camera movement, shadows use a 512² map, a cheaper filter and at most 30 updates per second. Pausing restores the 1024² map and nine-tap filter.
+- During playback or camera movement, shadows use half the selected map resolution, a cheaper filter and at most 30 updates per second. Pausing restores the selected resolution and nine-tap filter. Close paused views also use the detailed bead geometry in the shadow pass.
 - Sustained GPU pressure during motion reduces drawing resolution in bounded steps, down to 70%; lighter workloads restore it gradually. A stationary paused view restores full resolution. **RES** shows the current scale. Benchmarks always use full resolution for comparable geometry workloads.
 - UI updates and GPU telemetry are throttled independently of rendering.
 
@@ -67,7 +75,7 @@ open -n --stdout /tmp/null-metal.log --stderr /tmp/null-metal-errors.log \
 
 The `--benchmark` option shows the complete print and measures actual Metal command-buffer GPU time after warmup. Measurements include the main render pass and shadow updates when they occur. It does not imply feature parity with, or a controlled speed comparison against, the web renderer.
 
-The bundled checks cover relative extrusion, G92, relative coordinates, inch conversion, XY arcs, full circles, radius arcs, Bambu metadata, tool changes, boundary seeking, empty files, conservative run compaction, six-plane frustum culling, partial visibility ranges, adaptive-quality recovery, tool-change counters, and optional real-GPU shader compilation. Sample print files are local inputs and are not committed.
+The bundled checks cover relative extrusion, G92, relative coordinates, inch conversion, XY arcs, full circles, radius arcs, Bambu metadata, tool changes, boundary seeking, empty files, conservative run compaction, six-plane frustum culling, partial visibility ranges, adaptive-quality recovery, tool-change counters, per-tool filament consumption and retractions, H3C mesh layout and finite normals, and optional real-GPU shader compilation. Sample print files are local inputs and are not committed.
 
 ## Layout
 
