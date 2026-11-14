@@ -43,6 +43,19 @@ vertex Out bead(uint vid [[vertex_id]],uint instance [[instance_id]],constant In
     }
     return {u.vp*float4(world,1),world,normal,s.color,s.timing.w,heat,u.lightVP*float4(world,1)};
 }
+// Screen-facing elliptical ribbon: two triangles for distant beads instead of
+// generating the complete tube. Lighting normals retain a rounded appearance.
+vertex Out ribbon(uint vid [[vertex_id]],uint instance [[instance_id]],constant Instance *segments [[buffer(0)]],constant Uniforms &u [[buffer(1)]]) {
+    Instance s=segments[instance];float3 a=s.a.xyz,b=s.b.xyz;
+    if(u.clock.x<s.timing.y)b=mix(a,b,clamp((u.clock.x-s.timing.x)/max(.00001f,s.timing.y-s.timing.x),0.f,1.f));
+    float3 along=normalize(b-a+float3(.000001,0,0)),horizontal=normalize(cross(along,float3(0,1,0))),up=normalize(cross(horizontal,along));
+    float3 facing=normalize(u.eye.xyz-(a+b)*.5),side=normalize(cross(along,facing));
+    float radius=.5*length(float2(dot(side,horizontal)*s.a.w,dot(side,up)*s.b.w));
+    if(u.clock.z>0)radius*=1.12;
+    constexpr uint corners[6]={0,1,2,2,1,3};uint c=corners[vid];float sign=c>=2?1.f:-1.f;
+    float3 world=(c%2==0?a:b)+side*(sign*radius),normal=normalize(facing*.6+side*sign*.8);
+    return {u.vp*float4(world,1),world,normal,s.color,0,0,u.lightVP*float4(world,1)};
+}
 fragment float4 shaded(Out in [[stage_in]],constant Uniforms &u [[buffer(1)]],depth2d<float> shadowMap [[texture(0)]]) {
     float3 base=in.color.rgb,n=normalize(in.normal),v=normalize(u.eye.xyz-in.world),l=normalize(float3(-.4,1,.5));
     if(in.kind==1 && n.y>.5) {
@@ -54,7 +67,8 @@ fragment float4 shaded(Out in [[stage_in]],constant Uniforms &u [[buffer(1)]],de
         constexpr sampler shadowSampler(coord::normalized,filter::linear,compare_func::less_equal,address::clamp_to_edge);
         if(all(uv>0.f)&&all(uv<1.f)&&p.z>0&&p.z<1){
             float bias=max(.00025f,.001f*(1-dot(n,l)));visibility=0;
-            for(int x=-1;x<=1;x++)for(int y=-1;y<=1;y++)visibility+=shadowMap.sample_compare(shadowSampler,uv+float2(x,y)/float2(shadowMap.get_width(),shadowMap.get_height()),p.z-bias)/9.f;
+            if(u.head.w<.75) visibility=shadowMap.sample_compare(shadowSampler,uv,p.z-bias);
+            else for(int x=-1;x<=1;x++)for(int y=-1;y<=1;y++)visibility+=shadowMap.sample_compare(shadowSampler,uv+float2(x,y)/float2(shadowMap.get_width(),shadowMap.get_height()),p.z-bias)/9.f;
             visibility=mix(.35f,1.f,visibility);
         }
     }

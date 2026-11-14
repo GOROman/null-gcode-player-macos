@@ -12,6 +12,16 @@ public struct PrintFile: Sendable {
   public var bed: SIMD4<Float>, layerCount: Int, toolChanges: Int
   public var duration: Double { moves.last?.end ?? 0 }
   public var usedTools: [Int]
+  public var toolChangeTimes: [Double]
+  public func toolChanges(at time: Double) -> Int {
+    var lo = 0
+    var hi = toolChangeTimes.count
+    while lo < hi {
+      let mid = (lo + hi) / 2
+      if toolChangeTimes[mid] <= time { lo = mid + 1 } else { hi = mid }
+    }
+    return lo
+  }
   public func filamentColor(tool: Int) -> SIMD4<Float> {
     colors.indices.contains(tool) ? colors[tool] : SIMD4(0.38, 0.87, 0.76, 1)
   }
@@ -97,13 +107,19 @@ public enum GCodeParser {
     var bed = SIMD4<Float>(0, 0, 256, 256)
     var changes = 0
     var previousTool: Int?
+    var changeTimes = [Double]()
+    var pendingToolTime: Double?
     func append(_ a: SIMD3<Double>, _ b: SIMD3<Double>, _ deposit: Bool, _ line: Int) {
       let length = simd_length(b - a)
       guard length > 0.0000001 && layer >= 0 else { return }
       let start = clock
       clock += length / max(feed / 60, 0.01)
       if deposit {
-        if let previous = previousTool, previous != tool { changes += 1 }
+        if let previous = previousTool, previous != tool {
+          changes += 1
+          changeTimes.append(pendingToolTime ?? start)
+        }
+        pendingToolTime = nil
         previousTool = tool
       }
       moves.append(
@@ -159,7 +175,10 @@ public enum GCodeParser {
       scanner.index += 1
       guard let command = scanner.number() else { continue }
       if letter == 84 {
-        if command >= 0 && command < 255 { tool = Int(command) }
+        if command >= 0 && command < 255 {
+          if tool != Int(command) { pendingToolTime = clock }
+          tool = Int(command)
+        }
         continue
       }
       guard letter == 71 || letter == 77 else { continue }
@@ -287,7 +306,8 @@ public enum GCodeParser {
     return PrintFile(
       name: name, lines: lines, moves: moves, colors: colors.isEmpty ? [color("#62dec2")] : colors,
       bed: bed, layerCount: layer + 1, toolChanges: changes,
-      usedTools: Array(Set(moves.filter { $0.deposit }.map { $0.tool })).sorted())
+      usedTools: Array(Set(moves.filter { $0.deposit }.map { $0.tool })).sorted(),
+      toolChangeTimes: changeTimes)
   }
   public static func color(_ hex: String) -> SIMD4<Float> {
     let text = hex.trimmingCharacters(in: CharacterSet(charactersIn: "# "))

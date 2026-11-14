@@ -9,10 +9,16 @@ private struct Uniforms {
 }
 final class Renderer: NSObject, MTKViewDelegate {
   let player: Player, device: MTLDevice, queue: MTLCommandQueue, pipeline: MTLRenderPipelineState,
-    depth: MTLDepthStencilState, transparentDepth: MTLDepthStencilState
+    transparentPipeline: MTLRenderPipelineState, ribbonPipeline: MTLRenderPipelineState,
+    depth: MTLDepthStencilState,
+    transparentDepth: MTLDepthStencilState
   let inFlight = DispatchSemaphore(value: 3)
   var shadowPipeline: MTLRenderPipelineState!, shadowTexture: MTLTexture!,
     shadowVP = matrix_identity_float4x4, lastShadowTime = -Double.infinity
+  var blocks = [RenderBlock](), modelBounds = RenderBounds(low: .zero, high: .zero)
+  var quality = AdaptiveRenderQuality(), movingUntil = 0.0, previousEye = SIMD3<Float>.zero,
+    previousTarget = SIMD3<Float>.zero, lastShadowWall = -Double.infinity, shadowWasMoving = false
+  var lowShadowTexture: MTLTexture!
   var beads: MTLBuffer?, plate: MTLBuffer?, head: MTLBuffer?, headCount = 0, times = [Double](),
     starts = [Double]()
   var yaw: Float = 0.65, pitch: Float = 0.7, distance: Float = 400,
@@ -35,12 +41,17 @@ final class Renderer: NSObject, MTKViewDelegate {
     descriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat
     descriptor.depthAttachmentPixelFormat = view.depthStencilPixelFormat
     descriptor.rasterSampleCount = view.sampleCount
+    descriptor.colorAttachments[0].isBlendingEnabled = false
+    pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+    descriptor.vertexFunction = library.makeFunction(name: "ribbon")
+    ribbonPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+    descriptor.vertexFunction = library.makeFunction(name: "bead")
     descriptor.colorAttachments[0].isBlendingEnabled = true
     descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
     descriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
     descriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
     descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
-    pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+    transparentPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
     let depthDescriptor = MTLDepthStencilDescriptor()
     depthDescriptor.depthCompareFunction = .lessEqual
     depthDescriptor.isDepthWriteEnabled = true
@@ -56,6 +67,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     textureDescriptor.usage = [.renderTarget, .shaderRead]
     textureDescriptor.storageMode = .private
     shadowTexture = device.makeTexture(descriptor: textureDescriptor)!
+    textureDescriptor.width = 512
+    textureDescriptor.height = 512
+    lowShadowTexture = device.makeTexture(descriptor: textureDescriptor)!
     super.init()
     player.discoverGPU(device.name)
   }
@@ -67,10 +81,11 @@ final class Renderer: NSObject, MTKViewDelegate {
   }
   struct Prepared {
     var buffer: MTLBuffer?, starts: [Double], ends: [Double], low: SIMD3<Float>, high: SIMD3<Float>,
-      workers: Int
+      workers: Int, blocks: [RenderBlock]
   }
   static func prepare(_ file: PrintFile, device: MTLDevice) -> Prepared {
-    let indices = file.moves.indices.filter { file.moves[$0].deposit }
+    let runs = DepositCompactor.compact(file.moves)
+    let indices = runs.indices
     let workers = min(16, max(1, ProcessInfo.processInfo.activeProcessorCount - 2))
     let buffer =
       indices.isEmpty
@@ -84,7 +99,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     starts.reserveCapacity(indices.count)
     ends.reserveCapacity(indices.count)
     for index in indices {
-      let m = file.moves[index]
+      let m = runs[index]
       starts.append(m.start)
       ends.append(m.end)
       low = simd_min(low, simd_min(m.a, m.b))
@@ -98,7 +113,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let first = indices.count * worker / workers
         let last = indices.count * (worker + 1) / workers
         for i in first..<last {
-          let m = file.moves[indices[i]]
+          let m = runs[indices[i]]
           output[i] = GPUInstance(
             a: SIMD4(m.a, m.width), b: SIMD4(m.b, m.height),
             color: file.filamentColor(tool: m.tool),
@@ -106,12 +121,38 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
       }
     }
+    var blocks = [RenderBlock]()
+    for first in stride(from: 0, to: runs.count, by: 256) {
+      let end = min(first + 256, runs.count)
+      var blockLow = SIMD3<Float>(repeating: .infinity)
+      var blockHigh = SIMD3<Float>(repeating: -.infinity)
+      for index in first..<end {
+        let m = runs[index]
+        let padding = SIMD3<Float>(repeating: max(m.width, m.height) * 0.8 + 0.04)
+        blockLow = simd_min(blockLow, simd_min(m.a, m.b) - padding)
+        blockHigh = simd_max(blockHigh, simd_max(m.a, m.b) + padding)
+      }
+      blocks.append(
+        RenderBlock(
+          first: first, count: end - first, bounds: RenderBounds(low: blockLow, high: blockHigh)))
+    }
+    if let first = blocks.first {
+      low = first.bounds.low
+      high = first.bounds.high
+      for block in blocks.dropFirst() {
+        low = simd_min(low, block.bounds.low)
+        high = simd_max(high, block.bounds.high)
+      }
+    }
     return Prepared(
-      buffer: buffer, starts: starts, ends: ends, low: low, high: high, workers: workers)
+      buffer: buffer, starts: starts, ends: ends, low: low, high: high, workers: workers,
+      blocks: blocks)
   }
   func load(_ file: PrintFile, prepared: Prepared? = nil) {
     let geometry = prepared ?? Self.prepare(file, device: device)
     beads = geometry.buffer
+    blocks = geometry.blocks
+    modelBounds = RenderBounds(low: geometry.low, high: geometry.high)
     times = geometry.ends
     starts = geometry.starts
     let low = geometry.low
@@ -152,6 +193,8 @@ final class Renderer: NSObject, MTKViewDelegate {
       * lookAt(
         lightCenter + simd_normalize(SIMD3<Float>(-0.4, 1, 0.5)) * lightDistance, lightCenter)
     lastShadowTime = -Double.infinity
+    lastShadowWall = -Double.infinity
+    quality = AdaptiveRenderQuality()
     yaw = 0.65
     pitch = 0.7
     frameCount = 0
@@ -191,6 +234,23 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
     command.addCompletedHandler { [inFlight] _ in inFlight.signal() }
     let eye = target + SIMD3(sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch)) * distance
+    if simd_length_squared(eye - previousEye) > 0.0001
+      || simd_length_squared(target - previousTarget) > 0.0001
+    {
+      movingUntil = now + 0.25
+    }
+    previousEye = eye
+    previousTarget = target
+    let moving = player.playing || now < movingUntil
+    let scale = moving && !CommandLine.arguments.contains("--benchmark") ? quality.scale : 1
+    let nativeScale = view.window?.backingScaleFactor ?? 2
+    let desiredSize = CGSize(
+      width: max(1, (view.bounds.width * nativeScale * scale).rounded()),
+      height: max(1, (view.bounds.height * nativeScale * scale).rounded()))
+    if view.drawableSize != desiredSize { view.drawableSize = desiredSize }
+    let selectedShadow = moving ? lowShadowTexture! : shadowTexture!
+    let shadowChanged = moving != shadowWasMoving
+    shadowWasMoving = moving
     var headPosition = SIMD3<Float>(0, 0, 0)
     if let file = player.file {
       let move = file.moves[file.index(at: player.clock)]
@@ -201,7 +261,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     var uniforms = Uniforms(
       vp: perspective(
         Float.pi / 4.5, Float(view.drawableSize.width / max(1, view.drawableSize.height)), 0.1, 5000
-      ) * lookAt(eye, target), lightVP: shadowVP, head: SIMD4(headPosition, player.shadows ? 1 : 0),
+      ) * lookAt(eye, target), lightVP: shadowVP,
+      head: SIMD4(headPosition, player.shadows ? (moving ? 0.5 : 1) : 0),
       eye: SIMD4(eye, 1),
       clock: SIMD4(Float(player.clock), Float(player.speed), player.melt ? 1 : 0, 0))
     var visibleCount = 0
@@ -211,11 +272,20 @@ final class Renderer: NSObject, MTKViewDelegate {
       if starts[mid] <= player.clock { visibleCount = mid + 1 } else { hi = mid }
     }
     let pixel = 2 * distance * tan(Float.pi / 9) / Float(max(1, view.drawableSize.height))
-    let lod = pixel > 0.16 && pitch > 0.25
+    let lod = pixel > 0.16
     uniforms.clock.w = lod ? 1 : 0
-    if player.shadows && (abs(player.clock - lastShadowTime) > 0.03 || lastShadowTime < 0) {
+    let frustum = ViewFrustum(uniforms.vp)
+    let ranges =
+      visibleCount == 0
+      ? []
+      : (frustum.contains(modelBounds)
+        ? [0..<visibleCount] : frustum.visibleRanges(blocks, count: visibleCount))
+    if player.shadows
+      && (lastShadowTime < 0 || shadowChanged
+        || (player.clock != lastShadowTime && now - lastShadowWall >= (moving ? 1.0 / 30 : 0)))
+    {
       let shadowPass = MTLRenderPassDescriptor()
-      shadowPass.depthAttachment.texture = shadowTexture
+      shadowPass.depthAttachment.texture = selectedShadow
       shadowPass.depthAttachment.loadAction = .clear
       shadowPass.depthAttachment.storeAction = .store
       shadowPass.depthAttachment.clearDepth = 1
@@ -242,6 +312,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         shadowEncoder.endEncoding()
         lastShadowTime = player.clock
+        lastShadowWall = now
       }
     }
     guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
@@ -253,9 +324,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     encoder.setCullMode(.none)
     encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
     encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
-    encoder.setFragmentTexture(shadowTexture, index: 0)
+    encoder.setFragmentTexture(selectedShadow, index: 0)
     var submittedVertices = 0
-    let beadVertexCount = lod ? 12 : 60
+    let beadVertexCount = lod ? 6 : 60
     if let plate {
       var solid = uniforms
       solid.clock.w = 0
@@ -265,16 +336,21 @@ final class Renderer: NSObject, MTKViewDelegate {
       submittedVertices += 60
     }
     if let beads, visibleCount > 0 {
+      encoder.setRenderPipelineState(lod ? ribbonPipeline : pipeline)
       encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
       encoder.setVertexBuffer(beads, offset: 0, index: 0)
-      encoder.drawPrimitives(
-        type: .triangle, vertexStart: 0, vertexCount: beadVertexCount, instanceCount: visibleCount)
-      submittedVertices += beadVertexCount * visibleCount
+      for range in ranges {
+        encoder.drawPrimitives(
+          type: .triangle, vertexStart: 0, vertexCount: beadVertexCount, instanceCount: range.count,
+          baseInstance: range.lowerBound)
+        submittedVertices += beadVertexCount * range.count
+      }
     }
     if let head, player.file != nil {
       var solid = uniforms
       solid.clock.w = 0
       encoder.setVertexBytes(&solid, length: MemoryLayout<Uniforms>.stride, index: 1)
+      encoder.setRenderPipelineState(transparentPipeline)
       encoder.setDepthStencilState(transparentDepth)
       encoder.setVertexBuffer(head, offset: 0, index: 0)
       encoder.drawPrimitives(
@@ -286,6 +362,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     frameCount += 1
     frames += 1
     if now - lastStats >= 0.5 {
+      player.renderScale = scale
       player.renderedVertices = submittedVertices
       player.renderedTriangles = submittedVertices / 3
       player.fps = Double(frames) / (now - lastStats)
@@ -296,6 +373,7 @@ final class Renderer: NSObject, MTKViewDelegate {
       let elapsed = (completed.gpuEndTime - completed.gpuStartTime) * 1000
       DispatchQueue.main.async {
         guard let self else { return }
+        self.quality.sample(milliseconds: elapsed, active: moving)
         if now - self.lastGPUUI > 0.25 {
           self.player.gpuMS = elapsed
           self.lastGPUUI = now
