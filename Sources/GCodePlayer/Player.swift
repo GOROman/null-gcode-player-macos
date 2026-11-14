@@ -9,6 +9,30 @@ final class Player: ObservableObject {
   @Published var playing = false
   @Published var loading = false
   @Published var showCode = false
+  @Published var showClearance = false
+  @Published var checkingClearance = false
+  @Published var collisionHits: [HeadCollision] = []
+  @Published var clearanceChecked = false
+  private var loadGeneration = 0
+  func checkClearance() {
+    guard let file, !checkingClearance else { return }
+    showClearance = true
+    checkingClearance = true
+    let generation = loadGeneration
+    DispatchQueue.global(qos: .userInitiated).async {
+      let hits = HeadCollisionCheck.analyze(file.moves)
+      DispatchQueue.main.async {
+        guard generation == self.loadGeneration else { return }
+        self.collisionHits = hits
+        self.clearanceChecked = true
+        self.checkingClearance = false
+        if let first = hits.first {
+          self.playing = false
+          self.seek(first.start)
+        }
+      }
+    }
+  }
   @Published var melt = true
   @Published var lodMode = 0
   @Published var shadows = true
@@ -67,6 +91,10 @@ final class Player: ObservableObject {
   func load(_ url: URL) {
     guard !loading else { return }
     playing = false
+    loadGeneration += 1
+    checkingClearance = false
+    clearanceChecked = false
+    collisionHits = []
     loading = true
     message = "Loading \(url.lastPathComponent)…"
     let device = renderer?.device
@@ -85,6 +113,7 @@ final class Player: ObservableObject {
           self.renderer?.load(result, prepared: geometry)
           self.loading = false
           self.message = result.name
+          if CommandLine.arguments.contains("--check-clearance") { self.checkClearance() }
         }
       } catch {
         DispatchQueue.main.async {

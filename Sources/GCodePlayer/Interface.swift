@@ -72,6 +72,24 @@ struct ContentView: View {
       pill("terminal", "G-Code", active: player.showCode) { player.showCode.toggle() }
       pill("drop", "Melt", active: player.melt) { player.melt.toggle() }
       Menu {
+        Toggle("Show approximate head envelope", isOn: $player.showClearance)
+        Button(player.checkingClearance ? "Checking…" : "Check deposited-material clearance") {
+          player.checkClearance()
+        }.disabled(player.file == nil || player.checkingClearance)
+        Button("Jump to next potential collision") {
+          if let hit = player.collisionHits.first(where: { $0.start > player.clock + 0.001 })
+            ?? player.collisionHits.first
+          {
+            player.playing = false
+            player.seek(hit.start)
+          }
+        }.disabled(player.collisionHits.isEmpty)
+      } label: {
+        Label("Clearance", systemImage: "exclamationmark.shield")
+          .font(.system(size: 10, weight: .medium))
+      }.menuStyle(.borderlessButton).fixedSize()
+
+      Menu {
         Picker("Geometry detail", selection: $player.lodMode) {
           Text("Automatic · distance-based").tag(0)
           Text("High · rounded beads").tag(1)
@@ -128,8 +146,29 @@ struct ContentView: View {
           Text("T\(move.tool+1)").foregroundStyle(accent)
         }.font(.system(size: 8, design: .monospaced)).foregroundStyle(.secondary)
       }.padding(22).allowsHitTesting(false)
+      if player.showClearance {
+        VStack(alignment: .leading, spacing: 4) {
+          Text(
+            player.checkingClearance
+              ? "CHECKING CLEARANCE…"
+              : (player.clearanceChecked
+                ? "\(player.collisionHits.count) POTENTIAL COLLISION MOVES"
+                : "HEAD ENVELOPE · NOT CHECKED"))
+          if let hit = player.collisionHits.first(where: {
+            player.displayTime >= $0.start && player.displayTime <= $0.end
+          }) {
+            Text("POTENTIAL CONTACT · G-CODE LINE \(hit.line + 1)").foregroundStyle(.red)
+          }
+          Text("Approximate geometry / conservative sweep · not a safety certification")
+            .foregroundStyle(.secondary)
+        }.font(.system(size: 9, weight: .medium, design: .monospaced))
+          .foregroundStyle(.orange).padding(10).background(.black.opacity(0.7))
+          .padding(.leading, 22).padding(.top, 100).allowsHitTesting(false)
+      }
       if player.showCode {
-        source(file, line: move.line).padding(.leading, 22).padding(.top, 132).allowsHitTesting(
+        source(file, line: move.line).padding(.leading, 22).padding(
+          .top, player.showClearance ? 185 : 132
+        ).allowsHitTesting(
           false)
       }
       VStack {

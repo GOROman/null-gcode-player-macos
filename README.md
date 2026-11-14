@@ -88,3 +88,34 @@ The bundled checks cover relative extrusion, G92, relative coordinates, inch con
 - `Tests/GCodeCoreTests`: standalone checks, usable without XCTest.
 
 Created by GOROman.
+
+
+### Nonplanar air-pixel experiment and head clearance
+
+`samples/air-pixel-heart.gcode` is a **preview-only**, anchored, vertical 27-pixel
+heart. Generate it with `python3 scripts/generate-air-pixels.py`. All seven stems
+grow in 0.3 mm height bands; transfers lift above the current maximum height.
+The previous column-first path is retained as
+`air-pixel-heart-unsafe-columns.gcode` strictly as a collision regression fixture.
+Neither file is a validated H3C print job. Startup/heating sequences are absent;
+cooling dwell values are illustrative, and the viewer does not simulate dwell,
+cooling, sagging, strength, or the physical feasibility of the coiled beads.
+
+Use **Clearance → Check deposited-material clearance** for a background check.
+Orange wire boxes show approximate nozzle shoulder, sock, duct, carriage and
+upper-tool envelopes relative to the moving head. The overlay reports potential
+contact movements and their source lines; the menu can jump to the next one.
+Checking initially seeks the first flagged movement. `--check-clearance` starts
+this check on load; `--front-preview` opens the completed model from the front.
+
+The checker indexes previously deposited segments in a bounding-volume hierarchy
+and tests conservative swept head boxes, including travel and descent. Filament
+bounds include a width/height allowance. Future material is excluded. Diagonal
+sweeps and solid boxes around open parts may produce false positives. The outlet's
+immediate deposition zone is excluded. This is **not certified collision detection**:
+it uses the visual reconstruction rather than manufacturer CAD, excludes gantry,
+bed, fixtures and deformations, and does not check a move against its own freshly
+extruded material. A zero count is not proof that a job can be printed safely.
+
+The regression checks find 2,930 potential contact movements in the column-first
+fixture and zero in the height-ordered version under these same approximations.

@@ -250,7 +250,7 @@ public enum GCodeParser {
       let ne = pe.map { eAbsolute ? $0 * unit : e + $0 * unit } ?? e
       let deposit =
         ne - e > 0.000001
-        && (hypot(nx - x, ny - y) > 0.000001
+        && (simd_length(SIMD3(nx - x, ny - y, nz - z)) > 0.000001
           || ((command == 2 || command == 3) && (p[8] != nil || p[9] != nil)))
       let extrusionDelta = ne - e
       let debt = retractDebt[tool] ?? 0

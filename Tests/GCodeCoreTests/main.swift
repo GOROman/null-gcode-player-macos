@@ -22,6 +22,13 @@ do {
     equal(d.duration, 3)
     precondition(d.moves.map { $0.deposit } == [true, true, false])
   }
+  try check("Vertical extrusion and Z travel") {
+    let d = try GCodeParser.parse("G90\nM83\n; CHANGE_LAYER\nG1 Z2 E0.2 F60\nG1 Z4\nG1 E1")
+    precondition(d.moves.count == 2)
+    precondition(d.moves.map { $0.deposit } == [true, false])
+    equal(Double(d.moves[0].b.y), 2)
+    equal(d.duration, 4)
+  }
   try check("Relative XYZ and inches") {
     let d = try GCodeParser.parse("G20\nG91\nM83\nG1 X1 E1 F60\nG1 Y1 E1")
     equal(Double(d.moves[0].b.x), 25.4)
@@ -272,6 +279,29 @@ do {
     precondition(
       fresh.plan(blocks: block(3), count: 10, eye: .zero, height: 1000, fov: .pi / 2)[0].detail
         == .balanced)
+  }
+  try check("Swept head collision checks deposited history, including travel") {
+    let d = try GCodeParser.parse(
+      "G90\nM83\n; CHANGE_LAYER\nG1 X0 Z1 F600\nG1 Z30 E2\nG1 X50 Z40\nG1 X50 Z5\nG1 X-50 Z5")
+    let hits = HeadCollisionCheck.analyze(d.moves)
+    precondition(hits.contains { $0.moveIndex == d.moves.count - 1 })
+    precondition(!hits.contains { $0.moveIndex == 0 })
+    precondition(hits.allSatisfy { $0.printedMoveIndex < $0.moveIndex })
+    let clear = try GCodeParser.parse("G90\nM83\n; CHANGE_LAYER\nG1 Z1\nG1 X10 E1\nG1 Z50\nG1 X-10")
+    precondition(HeadCollisionCheck.analyze(clear.moves).isEmpty)
+    precondition(HeadEnvelope.wireVertices().count == HeadEnvelope.zones.count * 24)
+  }
+  if let path = ProcessInfo.processInfo.environment["NULL_COLLISION_SAMPLE"] {
+    try check("Height-ordered air pixels reduce potential head contacts") {
+      let safe = try PrintLoader.load(URL(fileURLWithPath: path + "/air-pixel-heart.gcode"))
+      let old = try PrintLoader.load(
+        URL(fileURLWithPath: path + "/air-pixel-heart-unsafe-columns.gcode"))
+      let before = HeadCollisionCheck.analyze(old.moves)
+      let after = HeadCollisionCheck.analyze(safe.moves)
+      print("Column-first: \(before.count); height-ordered: \(after.count) potential contact moves")
+      precondition(!before.isEmpty)
+      precondition(after.isEmpty)
+    }
   }
   if let path = CommandLine.arguments.dropFirst().first {
     try check("Metal shader compiles on the real GPU") {

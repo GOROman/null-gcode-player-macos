@@ -32,6 +32,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     transparentHeadCount = 0
   var beads: MTLBuffer?, plate: MTLBuffer?, times = [Double](),
     starts = [Double]()
+  var clearanceMesh: MTLBuffer?
+  var clearanceVertexCount = 0
   var followNozzle = false
   var yaw: Float = 0.65, pitch: Float = 0.7, distance: Float = 400,
     target = SIMD3<Float>(128, 0, -128)
@@ -102,6 +104,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     ribbonIndices = indices(MeshTopology.ribbon)
     shadowIndices = indices(MeshTopology.crossedRibbon)
     meniscusIndices = indices(MeshTopology.meniscus)
+    let wire = HeadEnvelope.wireVertices()
+    clearanceVertexCount = wire.count
+    clearanceMesh = wire.withUnsafeBytes {
+      device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)
+    }
     let mesh = H3CHeadMesh()
     opaqueHeadCount = mesh.opaque.count
     transparentHeadCount = mesh.transparent.count
@@ -249,6 +256,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     if CommandLine.arguments.contains("--benchmark") {
       player.seek(file.duration)
       viewReport(file, starts.count)
+    }
+    if CommandLine.arguments.contains("--front-preview") {
+      player.seek(file.duration)
+      yaw = 0
+      pitch = 0.08
     }
     if CommandLine.arguments.contains("--head-preview"),
       let move = file.moves.first(where: { $0.deposit })
@@ -522,6 +534,14 @@ final class Renderer: NSObject, MTKViewDelegate {
         submittedVertices += transparentHeadCount
         submittedTriangles += transparentHeadCount / 3
       }
+    }
+    if player.showClearance, player.file != nil, let clearanceMesh {
+      encoder.setRenderPipelineState(headPipeline)
+      encoder.setDepthStencilState(transparentDepth)
+      encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
+      encoder.setVertexBuffer(clearanceMesh, offset: 0, index: 0)
+      encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: clearanceVertexCount)
+      submittedVertices += clearanceVertexCount
     }
     encoder.endEncoding()
     let benchmark = CommandLine.arguments.contains("--benchmark") && player.file != nil
