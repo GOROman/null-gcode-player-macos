@@ -5,14 +5,21 @@ import simd
 struct GPUInstance { var a, b, color, timing: SIMD4<Float> }
 private struct Uniforms {
   var vp, lightVP: simd_float4x4
-  var head, eye, clock, filament: SIMD4<Float>
+  var head, eye, clock, filament, flow, beadShape: SIMD4<Float>
 }
 final class Renderer: NSObject, MTKViewDelegate {
   let player: Player, device: MTLDevice, queue: MTLCommandQueue, pipeline: MTLRenderPipelineState,
     transparentPipeline: MTLRenderPipelineState, ribbonPipeline: MTLRenderPipelineState,
     headPipeline: MTLRenderPipelineState, transparentHeadPipeline: MTLRenderPipelineState,
+    moltenPipeline: MTLRenderPipelineState,
     depth: MTLDepthStencilState,
     transparentDepth: MTLDepthStencilState
+  var balancedIndices: MTLBuffer!
+  var lodPlanner = LODPlanner(), cachedPlan = [LODDrawRange](), cachedLODHeight: Float = -1,
+    cachedLODMode = -1, cachedForcedIndex = -1
+  var beadIndices: MTLBuffer!, ribbonIndices: MTLBuffer!, shadowIndices: MTLBuffer!,
+    meniscusIndices: MTLBuffer!
+  var cachedCullVP = matrix_identity_float4x4, cachedCullCount = -1
   let inFlight = DispatchSemaphore(value: 3)
   var shadowPipeline: MTLRenderPipelineState!, shadowTexture: MTLTexture!,
     shadowVP = matrix_identity_float4x4, lastShadowTime = -Double.infinity
@@ -25,6 +32,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     transparentHeadCount = 0
   var beads: MTLBuffer?, plate: MTLBuffer?, times = [Double](),
     starts = [Double]()
+  var followNozzle = false
   var yaw: Float = 0.65, pitch: Float = 0.7, distance: Float = 400,
     target = SIMD3<Float>(128, 0, -128)
   var lastStats = ProcessInfo.processInfo.systemUptime, frames = 0, frameCount = 0,
@@ -60,6 +68,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     transparentHeadPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
     descriptor.colorAttachments[0].isBlendingEnabled = false
     headPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+    descriptor.vertexFunction = library.makeFunction(name: "moltenJoin")
+    moltenPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
     let depthDescriptor = MTLDepthStencilDescriptor()
     depthDescriptor.depthCompareFunction = .lessEqual
     depthDescriptor.isDepthWriteEnabled = true
@@ -82,6 +92,16 @@ final class Renderer: NSObject, MTKViewDelegate {
     lowShadowTexture = device.makeTexture(descriptor: textureDescriptor)!
     super.init()
     player.discoverGPU(device.name)
+    func indices(_ values: [UInt16]) -> MTLBuffer {
+      values.withUnsafeBytes {
+        device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)!
+      }
+    }
+    balancedIndices = indices(MeshTopology.balanced)
+    beadIndices = indices(MeshTopology.bead)
+    ribbonIndices = indices(MeshTopology.ribbon)
+    shadowIndices = indices(MeshTopology.crossedRibbon)
+    meniscusIndices = indices(MeshTopology.meniscus)
     let mesh = H3CHeadMesh()
     opaqueHeadCount = mesh.opaque.count
     transparentHeadCount = mesh.transparent.count
@@ -143,17 +163,20 @@ final class Renderer: NSObject, MTKViewDelegate {
     var blocks = [RenderBlock]()
     for first in stride(from: 0, to: runs.count, by: 256) {
       let end = min(first + 256, runs.count)
+      var width: Float = 0.01
       var blockLow = SIMD3<Float>(repeating: .infinity)
       var blockHigh = SIMD3<Float>(repeating: -.infinity)
       for index in first..<end {
         let m = runs[index]
+        width = max(width, max(m.width, m.height))
         let padding = SIMD3<Float>(repeating: max(m.width, m.height) * 0.8 + 0.04)
         blockLow = simd_min(blockLow, simd_min(m.a, m.b) - padding)
         blockHigh = simd_max(blockHigh, simd_max(m.a, m.b) + padding)
       }
       blocks.append(
         RenderBlock(
-          first: first, count: end - first, bounds: RenderBounds(low: blockLow, high: blockHigh)))
+          first: first, count: end - first, bounds: RenderBounds(low: blockLow, high: blockHigh),
+          beadWidth: width))
     }
     if let first = blocks.first {
       low = first.bounds.low
@@ -169,6 +192,9 @@ final class Renderer: NSObject, MTKViewDelegate {
   }
   func load(_ file: PrintFile, prepared: Prepared? = nil) {
     let geometry = prepared ?? Self.prepare(file, device: device)
+    followNozzle = false
+    cachedCullCount = -1
+    lodPlanner = LODPlanner()
     beads = geometry.buffer
     blocks = geometry.blocks
     modelBounds = RenderBounds(low: geometry.low, high: geometry.high)
@@ -233,13 +259,20 @@ final class Renderer: NSObject, MTKViewDelegate {
       yaw = 0.5
       pitch = 0.16
     }
+    if CommandLine.arguments.contains("--melt-preview"),
+      let move = file.moves.first(where: { $0.deposit })
+    {
+      player.seek(move.start + (move.end - move.start) * 0.6)
+      inspectNozzle()
+    }
   }
   func viewReport(_ file: PrintFile, _ count: Int) {
     print(
-      "Metal GPU: \(device.name)\nMoves: \(file.moves.count), extrusion instances: \(count), GPU geometry: \(count*64) bytes, triangles: \(count*20)\nLoad: \(String(format:"%0.1f",player.loadMS)) ms"
+      "Metal GPU: \(device.name)\nMoves: \(file.moves.count), extrusion instances: \(count), GPU geometry: \(count*64) bytes, full-detail triangles: \(count*32)\nLoad: \(String(format:"%0.1f",player.loadMS)) ms"
     )
   }
   func fit() {
+    followNozzle = false
     yaw = 0.65
     pitch = 0.7
     if let file = player.file {
@@ -259,8 +292,18 @@ final class Renderer: NSObject, MTKViewDelegate {
     lowShadowTexture = device.makeTexture(descriptor: descriptor)
     lastShadowTime = -.infinity
   }
-  func top() { pitch = 1.56 }
+  func inspectNozzle() {
+    followNozzle = true
+    distance = 8
+    yaw = 0.55
+    pitch = 0.38
+  }
+  func top() {
+    followNozzle = false
+    pitch = 1.56
+  }
   func pan(_ x: Float, _ y: Float) {
+    followNozzle = false
     target += SIMD3(-cos(yaw) * x, y, sin(yaw) * x) * (distance / 900)
   }
   func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
@@ -275,6 +318,31 @@ final class Renderer: NSObject, MTKViewDelegate {
       return
     }
     command.addCompletedHandler { [inFlight] _ in inFlight.signal() }
+    var headPosition = SIMD3<Float>(0, 0, 0)
+    var filamentColor = SIMD4<Float>(0.38, 0.87, 0.76, 1)
+    var flow = SIMD4<Float>.zero
+    var beadShape = SIMD4<Float>(0.42, 0.2, 0, 0)
+    if let file = player.file {
+      let move = file.moves[file.index(at: player.clock)]
+      let t = Float(
+        max(0, min(1, (player.clock - move.start) / max(0.000001, move.end - move.start))))
+      headPosition = simd_mix(move.a, move.b, SIMD3(repeating: t))
+      filamentColor = file.filamentColor(tool: move.tool)
+      if player.melt && move.deposit && player.clock < file.duration {
+        let direction = move.b - move.a
+        let length = simd_length(direction)
+        if length > 0.00001 {
+          let emitted = length * t
+          let fade = min(1, emitted / max(0.01, move.width * 0.3))
+          flow = SIMD4(direction / length, fade)
+          beadShape = SIMD4(move.width, move.height, 0, 0)
+        }
+      }
+    }
+    if followNozzle {
+      target =
+        headPosition - SIMD3(flow.x, flow.y, flow.z) * beadShape.x * 0.3 + SIMD3<Float>(0, -0.05, 0)
+    }
     let eye = target + SIMD3(sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch)) * distance
     if simd_length_squared(eye - previousEye) > 0.0001
       || simd_length_squared(target - previousTarget) > 0.0001
@@ -293,15 +361,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     let selectedShadow = moving ? lowShadowTexture! : shadowTexture!
     let shadowChanged = moving != shadowWasMoving
     shadowWasMoving = moving
-    var headPosition = SIMD3<Float>(0, 0, 0)
-    var filamentColor = SIMD4<Float>(0.38, 0.87, 0.76, 1)
-    if let file = player.file {
-      let move = file.moves[file.index(at: player.clock)]
-      let t = Float(
-        max(0, min(1, (player.clock - move.start) / max(0.000001, move.end - move.start))))
-      headPosition = simd_mix(move.a, move.b, SIMD3(repeating: t))
-      filamentColor = file.filamentColor(tool: move.tool)
-    }
     var uniforms = Uniforms(
       vp: perspective(
         Float.pi / 4.5, Float(view.drawableSize.width / max(1, view.drawableSize.height)), 0.1, 5000
@@ -309,7 +368,7 @@ final class Renderer: NSObject, MTKViewDelegate {
       head: SIMD4(headPosition, player.shadows ? (moving ? 0.5 : 1) : 0),
       eye: SIMD4(eye, 1),
       clock: SIMD4(Float(player.clock), Float(player.speed), player.melt ? 1 : 0, 0),
-      filament: filamentColor)
+      filament: filamentColor, flow: flow, beadShape: beadShape)
     var visibleCount = 0
     var hi = starts.count
     while visibleCount < hi {
@@ -319,12 +378,28 @@ final class Renderer: NSObject, MTKViewDelegate {
     let pixel = 2 * distance * tan(Float.pi / 9) / Float(max(1, view.drawableSize.height))
     let lod = pixel > 0.16
     uniforms.clock.w = lod ? 1 : 0
-    let frustum = ViewFrustum(uniforms.vp)
-    let ranges =
-      visibleCount == 0
-      ? []
-      : (frustum.contains(modelBounds)
-        ? [0..<visibleCount] : frustum.visibleRanges(blocks, count: visibleCount))
+    let sameCamera =
+      uniforms.vp.columns.0 == cachedCullVP.columns.0
+      && uniforms.vp.columns.1 == cachedCullVP.columns.1
+      && uniforms.vp.columns.2 == cachedCullVP.columns.2
+      && uniforms.vp.columns.3 == cachedCullVP.columns.3
+    let forcedIndex = player.melt && flow.w > 0 ? visibleCount - 1 : -1
+    let renderHeight = Float(view.drawableSize.height)
+    if cachedCullCount != visibleCount || !sameCamera || cachedLODHeight != renderHeight
+      || cachedLODMode != player.lodMode || cachedForcedIndex != forcedIndex
+    {
+      let frustum = ViewFrustum(uniforms.vp)
+      cachedPlan = lodPlanner.plan(
+        blocks: blocks, count: visibleCount, eye: eye, height: renderHeight, fov: Float.pi / 4.5,
+        frustum: frustum.contains(modelBounds) ? nil : frustum,
+        forceDetailedIndex: forcedIndex >= 0 ? forcedIndex : nil,
+        override: player.lodMode > 0 ? GeometryLOD(rawValue: player.lodMode - 1) : nil)
+      cachedCullCount = visibleCount
+      cachedCullVP = uniforms.vp
+      cachedLODHeight = renderHeight
+      cachedLODMode = player.lodMode
+      cachedForcedIndex = forcedIndex
+    }
     if player.shadows
       && (lastShadowTime < 0 || shadowChanged
         || (player.clock != lastShadowTime && now - lastShadowWall >= (moving ? 1.0 / 30 : 0)))
@@ -344,9 +419,12 @@ final class Renderer: NSObject, MTKViewDelegate {
           &shadowUniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
         if let beads, visibleCount > 0 {
           shadowEncoder.setVertexBuffer(beads, offset: 0, index: 0)
-          shadowEncoder.drawPrimitives(
-            type: .triangle, vertexStart: 0, vertexCount: moving || lod ? 12 : 60,
-            instanceCount: visibleCount)
+          let simple = moving || lod
+          shadowEncoder.drawIndexedPrimitives(
+            type: .triangle,
+            indexCount: simple ? MeshTopology.crossedRibbon.count : MeshTopology.bead.count,
+            indexType: .uint16, indexBuffer: simple ? shadowIndices : beadIndices,
+            indexBufferOffset: 0, instanceCount: visibleCount)
         }
         if player.file != nil {
           shadowEncoder.setRenderPipelineState(headShadowPipeline)
@@ -370,6 +448,7 @@ final class Renderer: NSObject, MTKViewDelegate {
       inFlight.signal()
       return
     }
+    uniforms.clock.w = 0
     encoder.setRenderPipelineState(pipeline)
     encoder.setDepthStencilState(depth)
     encoder.setCullMode(.none)
@@ -377,7 +456,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
     encoder.setFragmentTexture(selectedShadow, index: 0)
     var submittedVertices = 0
-    let beadVertexCount = lod ? 6 : 60
+    var submittedTriangles = 0
     if let plate {
       var solid = uniforms
       solid.clock.w = 0
@@ -385,17 +464,46 @@ final class Renderer: NSObject, MTKViewDelegate {
       encoder.setVertexBuffer(plate, offset: 0, index: 0)
       encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 60, instanceCount: 1)
       submittedVertices += 60
+      submittedTriangles += 20
     }
     if let beads, visibleCount > 0 {
-      encoder.setRenderPipelineState(lod ? ribbonPipeline : pipeline)
       encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
       encoder.setVertexBuffer(beads, offset: 0, index: 0)
-      for range in ranges {
-        encoder.drawPrimitives(
-          type: .triangle, vertexStart: 0, vertexCount: beadVertexCount, instanceCount: range.count,
-          baseInstance: range.lowerBound)
-        submittedVertices += beadVertexCount * range.count
+      for plan in cachedPlan {
+        let count: Int
+        let vertices: Int
+        let indices: MTLBuffer
+        switch plan.detail {
+        case .detailed:
+          count = MeshTopology.bead.count
+          vertices = MeshTopology.beadVertices
+          indices = beadIndices
+        case .balanced:
+          count = MeshTopology.balanced.count
+          vertices = MeshTopology.balancedVertices
+          indices = balancedIndices
+        case .distant:
+          count = MeshTopology.ribbon.count
+          vertices = MeshTopology.ribbonVertices
+          indices = ribbonIndices
+        }
+        encoder.setRenderPipelineState(plan.detail == .distant ? ribbonPipeline : pipeline)
+        encoder.drawIndexedPrimitives(
+          type: .triangle, indexCount: count, indexType: .uint16, indexBuffer: indices,
+          indexBufferOffset: 0, instanceCount: plan.range.count, baseVertex: 0,
+          baseInstance: plan.range.lowerBound)
+        submittedVertices += vertices * plan.range.count
+        submittedTriangles += count / 3 * plan.range.count
       }
+    }
+    if player.melt && flow.w > 0 && pixel < 0.2 {
+      encoder.setRenderPipelineState(moltenPipeline)
+      encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
+      encoder.drawIndexedPrimitives(
+        type: .triangle, indexCount: MeshTopology.meniscus.count, indexType: .uint16,
+        indexBuffer: meniscusIndices, indexBufferOffset: 0)
+      submittedVertices += MeshTopology.meniscusVertices
+      submittedTriangles += MeshTopology.meniscus.count / 3
     }
     if player.file != nil {
       encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
@@ -404,6 +512,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.setVertexBuffer(opaqueHead, offset: 0, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: opaqueHeadCount)
         submittedVertices += opaqueHeadCount
+        submittedTriangles += opaqueHeadCount / 3
       }
       if let transparentHead {
         encoder.setRenderPipelineState(transparentHeadPipeline)
@@ -411,6 +520,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.setVertexBuffer(transparentHead, offset: 0, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: transparentHeadCount)
         submittedVertices += transparentHeadCount
+        submittedTriangles += transparentHeadCount / 3
       }
     }
     encoder.endEncoding()
@@ -420,7 +530,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     if now - lastStats >= 0.5 {
       player.renderScale = scale
       player.renderedVertices = submittedVertices
-      player.renderedTriangles = submittedVertices / 3
+      player.renderedTriangles = submittedTriangles
       player.fps = Double(frames) / (now - lastStats)
       frames = 0
       lastStats = now

@@ -72,6 +72,17 @@ struct ContentView: View {
       pill("terminal", "G-Code", active: player.showCode) { player.showCode.toggle() }
       pill("drop", "Melt", active: player.melt) { player.melt.toggle() }
       Menu {
+        Picker("Geometry detail", selection: $player.lodMode) {
+          Text("Automatic · distance-based").tag(0)
+          Text("High · rounded beads").tag(1)
+          Text("Balanced · simplified beads").tag(2)
+          Text("Fast · ribbons").tag(3)
+        }
+      } label: {
+        Label("Detail", systemImage: "cube").font(.system(size: 10, weight: .medium))
+      }.menuStyle(.borderlessButton).fixedSize().padding(.horizontal, 10).padding(.vertical, 8)
+        .background(.white.opacity(0.04), in: Capsule())
+      Menu {
         Toggle("Shadows", isOn: $player.shadows)
         Picker("Shadow map", selection: $player.shadowResolution) {
           Text("1K · Fast").tag(1024)
@@ -144,7 +155,7 @@ struct ContentView: View {
               metric("VERTICES", player.renderedVertices)
             }
             Text(
-              "RES \(Int((player.renderScale*100).rounded()))% · SHADOW \(player.shadowResolution/1024)K"
+              "RES \(Int((player.renderScale*100).rounded()))% · LOD \(["AUTO","HIGH","MID","FAST"][player.lodMode]) · SHADOW \(player.shadowResolution/1024)K"
             ).font(.system(size: 7, design: .monospaced)).foregroundStyle(.secondary)
           }.padding(18).background(ink.opacity(0.72), in: RoundedRectangle(cornerRadius: 12))
             .padding(12)
@@ -158,6 +169,11 @@ struct ContentView: View {
             ).tracking(2)
           }.foregroundStyle(.secondary)
           Spacer()
+          Button {
+            player.renderer?.inspectNozzle()
+          } label: {
+            Image(systemName: "drop.circle").font(.system(size: 14)).padding(9)
+          }.help("Follow nozzle / inspect melt")
           Button {
             player.renderer?.top()
           } label: {

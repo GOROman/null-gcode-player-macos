@@ -62,7 +62,9 @@ public struct RenderBounds: Sendable {
 public struct RenderBlock: Sendable {
   public var first, count: Int
   public var bounds: RenderBounds
-  public init(first: Int, count: Int, bounds: RenderBounds) {
+  public var beadWidth: Float
+  public init(first: Int, count: Int, bounds: RenderBounds, beadWidth: Float = 0.42) {
+    self.beadWidth = beadWidth
     self.first = first
     self.count = count
     self.bounds = bounds

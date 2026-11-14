@@ -169,6 +169,110 @@ do {
       })
     precondition(mesh.opaque.contains { $0.color.w < 0 })
   }
+  check("Indexed bead and meniscus retain closed surfaces without degenerate triangles") {
+    precondition(MeshTopology.bead.count == 96 && MeshTopology.beadVertices == 34)
+    precondition(MeshTopology.ribbon.count == 6 && MeshTopology.ribbonVertices == 4)
+    precondition(MeshTopology.meniscus.count == 672 && MeshTopology.meniscusVertices == 114)
+    func closed(_ indices: [UInt16], _ position: (Int) -> SIMD3<Float>) {
+      var canonical = [String: Int]()
+      var points = [SIMD3<Float>]()
+      var mapped = [Int]()
+      for index in indices {
+        let p = position(Int(index))
+        let key =
+          "\(Int((p.x*10000).rounded())),\(Int((p.y*10000).rounded())),\(Int((p.z*10000).rounded()))"
+        if canonical[key] == nil {
+          canonical[key] = canonical.count
+          points.append(p)
+        }
+        mapped.append(canonical[key]!)
+      }
+      var edges = [String: Int]()
+      for i in stride(from: 0, to: mapped.count, by: 3) {
+        let a = mapped[i]
+        let b = mapped[i + 1]
+        let c = mapped[i + 2]
+        precondition(
+          simd_length(simd_cross(points[b] - points[a], points[c] - points[a])) > 0.00001)
+        for (u, v) in [(a, b), (b, c), (c, a)] { edges["\(min(u,v)),\(max(u,v))", default: 0] += 1 }
+      }
+      precondition(edges.values.allSatisfy { $0 == 2 })
+      precondition(points.count - edges.count + indices.count / 3 == 2)
+    }
+    for indices in [MeshTopology.bead, MeshTopology.balanced] {
+      closed(indices) { id in
+        let end = id < 48 ? id % 6 == 1 : id >= 72
+        let ring: Int?
+        if id < 48 {
+          ring = id / 6
+        } else {
+          let local = id - (end ? 72 : 48)
+          ring = local == 0 ? nil : (local - 1) / 3
+        }
+        guard let ring else { return SIMD3(end ? 1 : 0, 0, 0) }
+        let angle = Float(ring) * 2 * .pi / 8
+        return SIMD3(end ? 1 : 0, sin(angle), -cos(angle))
+      }
+    }
+    closed(MeshTopology.meniscus) { id in
+      let cell = id / 6
+      let corner = [0, 1, 2, 2, 1, 3][id % 6]
+      let theta = Float(cell / 16 + (corner >= 2 ? 1 : 0)) * .pi / 8
+      let phi = Float(cell % 16 + (corner % 2 == 1 ? 1 : 0)) * 2 * .pi / 16
+      return SIMD3(sin(theta) * cos(phi), cos(theta), sin(theta) * sin(phi))
+    }
+  }
+  check("LOD selects independent near, middle and far blocks, with active-nozzle protection") {
+    func block(_ first: Int, _ z: Float) -> RenderBlock {
+      RenderBlock(
+        first: first, count: 10,
+        bounds: RenderBounds(low: SIMD3(-0.1, -0.1, -z - 0.1), high: SIMD3(0.1, 0.1, -z + 0.1)),
+        beadWidth: 0.4)
+    }
+    let blocks = [block(0, 2), block(10, 70), block(20, 400)]
+    var planner = LODPlanner()
+    let result = planner.plan(blocks: blocks, count: 30, eye: .zero, height: 1000, fov: .pi / 2)
+    precondition(result.map { $0.detail } == [.detailed, .balanced, .distant])
+    let active = planner.plan(
+      blocks: blocks, count: 25, eye: .zero, height: 1000, fov: .pi / 2, forceDetailedIndex: 24)
+    precondition(active.last?.detail == .detailed && active.last?.range == 20..<25)
+    let override = planner.plan(
+      blocks: blocks, count: 25, eye: .zero, height: 1000, fov: .pi / 2, override: .distant)
+    precondition(
+      override.count == 1 && override[0].range == 0..<25 && override[0].detail == .distant)
+    precondition(
+      planner.plan(blocks: blocks, count: 0, eye: .zero, height: 1000, fov: .pi / 2).isEmpty)
+  }
+  check("LOD hysteresis avoids flicker and responds to projected size and resolution") {
+    func block(_ pixels: Float) -> [RenderBlock] {
+      let z: Float = -200 / pixels
+      return [
+        RenderBlock(
+          first: 0, count: 10, bounds: RenderBounds(low: SIMD3(0, 0, z), high: SIMD3(0, 0, z)),
+          beadWidth: 0.4)
+      ]
+    }
+    var planner = LODPlanner()
+    func selected(_ pixels: Float) -> GeometryLOD {
+      planner.plan(blocks: block(pixels), count: 10, eye: .zero, height: 1000, fov: .pi / 2)[0]
+        .detail
+    }
+    precondition(selected(5.1) == .detailed)
+    precondition(selected(4.9) == .detailed)
+    precondition(selected(4.0) == .balanced)
+    precondition(selected(5.1) == .balanced)
+    precondition(selected(5.9) == .detailed)
+    precondition(selected(1.5) == .distant)
+    precondition(selected(2.1) == .distant)
+    precondition(selected(2.5) == .balanced)
+    var fresh = LODPlanner()
+    precondition(
+      fresh.plan(blocks: block(3), count: 10, eye: .zero, height: 400, fov: .pi / 2)[0].detail
+        == .distant)
+    precondition(
+      fresh.plan(blocks: block(3), count: 10, eye: .zero, height: 1000, fov: .pi / 2)[0].detail
+        == .balanced)
+  }
   if let path = CommandLine.arguments.dropFirst().first {
     try check("Metal shader compiles on the real GPU") {
       guard let device = MTLCreateSystemDefaultDevice() else {
@@ -178,7 +282,8 @@ do {
         source: String(contentsOfFile: path, encoding: .utf8), options: nil)
       precondition(
         lib.makeFunction(name: "bead") != nil && lib.makeFunction(name: "shaded") != nil
-          && lib.makeFunction(name: "ribbon") != nil && lib.makeFunction(name: "toolhead") != nil)
+          && lib.makeFunction(name: "ribbon") != nil && lib.makeFunction(name: "toolhead") != nil
+          && lib.makeFunction(name: "moltenJoin") != nil)
     }
   }
   print("\(count) checks passed")

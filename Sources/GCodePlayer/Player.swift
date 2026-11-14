@@ -10,6 +10,7 @@ final class Player: ObservableObject {
   @Published var loading = false
   @Published var showCode = false
   @Published var melt = true
+  @Published var lodMode = 0
   @Published var shadows = true
   @Published var shadowResolution = 2048 {
     didSet { renderer?.setShadowResolution(shadowResolution) }
@@ -161,6 +162,7 @@ final class PreviewView: MTKView {
   override var acceptsFirstResponder: Bool { true }
   override func mouseDown(with event: NSEvent) { window?.makeFirstResponder(self) }
   override func mouseDragged(with event: NSEvent) {
+    renderer?.followNozzle = false
     renderer?.yaw -= Float(event.deltaX) * 0.007
     renderer?.pitch = max(0.04, min(1.56, (renderer?.pitch ?? 0.7) + Float(event.deltaY) * 0.007))
   }
