@@ -15,6 +15,8 @@ final class Player: ObservableObject {
   @Published var displayTime = 0.0
   @Published var fps = 0.0
   @Published var gpuMS = 0.0
+  @Published var renderedTriangles = 0
+  @Published var renderedVertices = 0
   @Published var loadMS = 0.0
   @Published var gpuInfo = "METAL GPU"
   let cpuCores = ProcessInfo.processInfo.activeProcessorCount
@@ -160,6 +162,16 @@ struct ContentView: View {
                     .font(.system(size: 8, design: .monospaced)).foregroundStyle(.secondary)
                   Text(String(format: "%0.0f FPS · %0.2f ms GPU", player.fps, player.gpuMS)).font(
                     .system(size: 10, design: .monospaced))
+                  Text("POLYGONS \(player.renderedTriangles.formatted())")
+                    .font(.system(size: 9, design: .monospaced))
+                    .help(
+                      "Triangles submitted in the main view, including the plate and head. Shadow passes are excluded."
+                    )
+                  Text("VERTICES \(player.renderedVertices.formatted())")
+                    .font(.system(size: 9, design: .monospaced))
+                    .help(
+                      "Vertex shader invocations in the main view, including instanced and repeated vertices. Shadow passes are excluded."
+                    )
                   Text(
                     String(format: "%0.1f%%", player.displayTime / max(file.duration, 0.001) * 100)
                   ).font(.system(size: 14, weight: .medium, design: .monospaced))

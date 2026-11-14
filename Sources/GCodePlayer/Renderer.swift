@@ -254,18 +254,22 @@ final class Renderer: NSObject, MTKViewDelegate {
     encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
     encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
     encoder.setFragmentTexture(shadowTexture, index: 0)
+    var submittedVertices = 0
+    let beadVertexCount = lod ? 12 : 60
     if let plate {
       var solid = uniforms
       solid.clock.w = 0
       encoder.setVertexBytes(&solid, length: MemoryLayout<Uniforms>.stride, index: 1)
       encoder.setVertexBuffer(plate, offset: 0, index: 0)
       encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 60, instanceCount: 1)
+      submittedVertices += 60
     }
     if let beads, visibleCount > 0 {
       encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
       encoder.setVertexBuffer(beads, offset: 0, index: 0)
       encoder.drawPrimitives(
-        type: .triangle, vertexStart: 0, vertexCount: lod ? 12 : 60, instanceCount: visibleCount)
+        type: .triangle, vertexStart: 0, vertexCount: beadVertexCount, instanceCount: visibleCount)
+      submittedVertices += beadVertexCount * visibleCount
     }
     if let head, player.file != nil {
       var solid = uniforms
@@ -275,12 +279,15 @@ final class Renderer: NSObject, MTKViewDelegate {
       encoder.setVertexBuffer(head, offset: 0, index: 0)
       encoder.drawPrimitives(
         type: .triangle, vertexStart: 0, vertexCount: 60, instanceCount: headCount)
+      submittedVertices += 60 * headCount
     }
     encoder.endEncoding()
     let benchmark = CommandLine.arguments.contains("--benchmark") && player.file != nil
     frameCount += 1
     frames += 1
     if now - lastStats >= 0.5 {
+      player.renderedVertices = submittedVertices
+      player.renderedTriangles = submittedVertices / 3
       player.fps = Double(frames) / (now - lastStats)
       frames = 0
       lastStats = now
