@@ -107,3 +107,42 @@ fragment float4 shaded(Out in [[stage_in]],constant Uniforms &u [[buffer(1)]],de
     float3 color=base*(.28+1.7*diffuse+rim*.2)+spec*visibility*(in.kind==1?.006:mix(.25,.85,heat));
     color=color/(1+color);color=pow(max(color,0.f),float3(1/2.2f));return float4(color,in.color.a);
 }
+
+// Closest points on two finite segments, including parallel and degenerate cases.
+float2 filamentClosest(float3 p,float3 q,float3 a,float3 b) {
+    float3 d=q-p,e=b-a,r=p-a;
+    float dd=dot(d,d),ee=dot(e,e),de=dot(d,e),dr=dot(d,r),er=dot(e,r);
+    float s=0,t=0;
+    if(dd<1e-8f) return float2(0,ee>1e-8f?clamp(er/ee,0.f,1.f):0.f);
+    if(ee<1e-8f) return float2(clamp(-dr/dd,0.f,1.f),0);
+    float denom=dd*ee-de*de;
+    if(denom>1e-8f)s=clamp((de*er-dr*ee)/denom,0.f,1.f);
+    t=(de*s+er)/ee;
+    if(t<0){t=0;s=clamp(-dr/dd,0.f,1.f);}
+    else if(t>1){t=1;s=clamp((de-dr)/dd,0.f,1.f);}
+    return float2(s,t);
+}
+kernel void filamentContacts(const device float4 *input [[buffer(0)]],device float4 *output [[buffer(1)]],constant uint &count [[buffer(2)]],uint i [[thread_position_in_grid]]) {
+    if(i>=count)return;
+    float4 node=input[i]; float3 correction=0;float contacts=0;
+    if(node.w>0) for(uint side=0;side<2;side++) {
+        if((side==0&&i==0)||(side==1&&i+1>=count))continue;
+        uint first=side==0?i-1:i,second=first+1;
+        float3 p=input[first].xyz,q=input[second].xyz;
+        for(uint j=0;j+1<count;j++) {
+            if(abs(int(j)-int(first))<=2)continue;
+            float3 a=input[j].xyz,b=input[j+1].xyz;
+            if(any(max(min(p,q),min(a,b))-min(max(p,q),max(a,b))>float3(.44)))continue;
+            float2 st=filamentClosest(p,q,a,b);
+            float3 delta=mix(p,q,st.x)-mix(a,b,st.y);float dist=length(delta);
+            if(dist>=.44f)continue;
+            float weight=side==0?st.x:1-st.x;
+            float other=mix(input[j].w,input[j+1].w,st.y);
+            float3 normal=dist>1e-5f?delta/dist:float3(0,1,0);
+            correction+=normal*(.44f-dist)*weight*node.w/max(.001f,node.w+other);
+            contacts+=1;
+        }
+    }
+    if(contacts>0)node.xyz+=correction/max(1.f,contacts)*.8f;
+    node.y=max(.22f,node.y);output[i]=node;
+}

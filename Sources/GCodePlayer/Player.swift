@@ -33,6 +33,19 @@ final class Player: ObservableObject {
       }
     }
   }
+  @Published var environmentOpen = false
+  @Published var nozzleTemperature = 210.0
+  @Published var coolingFan = 1.0
+  @Published var viscosityScale = 1.0
+  @Published var contactFriction = 0.45
+  @Published var plateTemperature = 60.0
+  @Published var roomTemperature = 25.0
+  @Published var humidity = 45.0
+  @Published var simulateAdhesion = false
+  var peelRisk: Double {
+    min(1, max(0, (55 - plateTemperature) / 55 + max(0, humidity - 50) / 100 + max(0, 20 - roomTemperature) / 60))
+  }
+  @Published var moja = false
   @Published var melt = true
   @Published var lodMode = 0
   @Published var shadows = true
@@ -91,6 +104,7 @@ final class Player: ObservableObject {
   func load(_ url: URL) {
     guard !loading else { return }
     playing = false
+    moja = false
     loadGeneration += 1
     checkingClearance = false
     clearanceChecked = false

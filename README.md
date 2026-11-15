@@ -125,3 +125,22 @@ extruded material. A zero count is not proof that a job can be printed safely.
 
 The regression checks find 2,930 potential contact movements in the column-first
 fixture and zero in the height-ordered version under these same approximations.
+
+### Experimental filament failure (Moja)
+
+The **モジャ** button switches subsequent extrusion to a bounded rope simulation.
+**Environment** adjusts simulated nozzle/plate/ambient temperature, humidity,
+cooling fan and relative PLA viscosity. These are local visual controls, not
+printer commands. The PLA model uses an illustrative temperature-dependent
+viscosity and exponential cooling curve; it is not calibrated rheology. Initial
+210 °C nozzle temperature is consistent with [Prusament PLA guidance](https://prusament.com/wp-content/uploads/2022/10/PLA_Prusament_TDS_2021_10_EN.pdf),
+but solver coefficients are artistic approximations. Cold strands retain their
+shape, and each emitted strand retains its original filament color.
+
+Metal compute projects nonadjacent segment contacts in parallel, using four
+Jacobi passes and asynchronous readback. Integration and constraints remain on
+the CPU. The solver retains up to 1,200 particles and retires the oldest when
+necessary so extrusion continues. Existing printed material is approximated by
+a 1 mm top-surface height map; cavities, undersides, rigid-body peeling and
+continuous collision detection are not modeled. Extremely fast motion may still
+cause penetration. No claim of physically predictive failure simulation is made.

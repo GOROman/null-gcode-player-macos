@@ -34,6 +34,13 @@ final class Renderer: NSObject, MTKViewDelegate {
     starts = [Double]()
   var clearanceMesh: MTLBuffer?
   var clearanceVertexCount = 0
+  var gpuContacts: GPUFilamentContacts?
+  var contactLibrary: MTLLibrary!
+  var spaghetti = Spaghetti()
+  var failureClock: Double?
+  var failureWall = 0.0
+  var extrusionClock = 0.0
+  var pendingExtrusion = false
   var followNozzle = false
   var yaw: Float = 0.65, pitch: Float = 0.7, distance: Float = 400,
     target = SIMD3<Float>(128, 0, -128)
@@ -93,6 +100,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     textureDescriptor.height = 1024
     lowShadowTexture = device.makeTexture(descriptor: textureDescriptor)!
     super.init()
+    contactLibrary = library
     player.discoverGPU(device.name)
     func indices(_ values: [UInt16]) -> MTLBuffer {
       values.withUnsafeBytes {
@@ -381,11 +389,48 @@ final class Renderer: NSObject, MTKViewDelegate {
       eye: SIMD4(eye, 1),
       clock: SIMD4(Float(player.clock), Float(player.speed), player.melt ? 1 : 0, 0),
       filament: filamentColor, flow: flow, beadShape: beadShape)
+    if player.simulateAdhesion && player.playing && !player.moja && player.peelRisk > 0 {
+      let progress = player.clock / max(1, player.file?.duration ?? 1)
+      if progress > 0.03 + (1 - player.peelRisk) * 0.85 { player.moja = true }
+    }
+    if player.moja {
+      if failureClock == nil {
+        failureClock = player.clock; extrusionClock = player.clock; pendingExtrusion = false; spaghetti = Spaghetti(); gpuContacts = try? GPUFilamentContacts(device: device, library: contactLibrary); failureWall = now
+        if let file = player.file { spaghetti.setObstacle(file.moves, through: player.clock) }
+      }
+      if player.clock < (failureClock ?? 0) { failureClock = player.clock; extrusionClock = player.clock; pendingExtrusion = false; spaghetti = Spaghetti(); gpuContacts = try? GPUFilamentContacts(device: device, library: contactLibrary); if let file = player.file { spaghetti.setObstacle(file.moves, through: player.clock) } }
+      spaghetti.friction = Float(player.contactFriction)
+      spaghetti.material.nozzle = Float(player.nozzleTemperature)
+      spaghetti.material.ambient = Float(player.roomTemperature)
+      spaghetti.material.fan = Float(player.coolingFan)
+      spaghetti.material.viscosityScale = Float(player.viscosityScale)
+      let move = player.file.map { $0.moves[$0.index(at: player.clock)] }
+      if let file = player.file, player.playing {
+        for tool in file.usedTools {
+          if file.filamentUsage.millimeters(tool:tool,at:player.clock) > file.filamentUsage.millimeters(tool:tool,at:extrusionClock) + 0.000001 { pendingExtrusion = true }
+        }
+      }
+      extrusionClock = player.clock
+      let contactState = gpuContacts?.consume()
+      if let corrected = contactState?.points { spaghetti.applyContacts(corrected) }
+      spaghetti.gpuContacts = gpuContacts != nil
+      if player.playing && contactState?.waiting != true {
+        spaghetti.advance(dt: Float(now-failureWall), nozzle: headPosition, emitting: pendingExtrusion || move?.deposit == true, color: filamentColor)
+        pendingExtrusion = false; failureWall = now
+      } else if !player.playing { failureWall = now }
+    } else { failureClock = nil; spaghetti = Spaghetti(); gpuContacts = nil; failureWall = now }
+    if player.moja && player.playing && gpuContacts?.isBusy == false {
+      let move = player.file.map { $0.moves[$0.index(at: player.clock)] }
+      var mobility = spaghetti.points.indices.map { 1-spaghetti.hardness(at: $0) }
+      if move?.deposit == true && !mobility.isEmpty { mobility[mobility.count-1] = 0 }
+      gpuContacts?.encode(command: command, positions: spaghetti.points, mobility: mobility)
+    }
+    let geometryClock = failureClock ?? player.clock
     var visibleCount = 0
     var hi = starts.count
     while visibleCount < hi {
       let mid = (visibleCount + hi) / 2
-      if starts[mid] <= player.clock { visibleCount = mid + 1 } else { hi = mid }
+      if starts[mid] <= geometryClock { visibleCount = mid + 1 } else { hi = mid }
     }
     let pixel = 2 * distance * tan(Float.pi / 9) / Float(max(1, view.drawableSize.height))
     let lod = pixel > 0.16
@@ -516,6 +561,21 @@ final class Renderer: NSObject, MTKViewDelegate {
         indexBuffer: meniscusIndices, indexBufferOffset: 0)
       submittedVertices += MeshTopology.meniscusVertices
       submittedTriangles += MeshTopology.meniscus.count / 3
+    }
+    if player.moja, spaghetti.points.count > 1 {
+      var rope = [GPUInstance]()
+      for i in 1..<spaghetti.points.count {
+        rope.append(GPUInstance(a: SIMD4(spaghetti.points[i-1], 0.4), b: SIMD4(spaghetti.points[i], 0.4), color: spaghetti.colors[i], timing: SIMD4(0, 0, 0, 0)))
+      }
+      if let mesh = buffer(rope) {
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setDepthStencilState(depth)
+        encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
+        encoder.setVertexBuffer(mesh, offset: 0, index: 0)
+        encoder.drawIndexedPrimitives(type: .triangle, indexCount: MeshTopology.balanced.count, indexType: .uint16, indexBuffer: balancedIndices, indexBufferOffset: 0, instanceCount: rope.count)
+        submittedTriangles += rope.count * 16
+        submittedVertices += rope.count * MeshTopology.balancedVertices
+      }
     }
     if player.file != nil {
       encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)

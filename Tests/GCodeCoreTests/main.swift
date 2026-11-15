@@ -303,6 +303,67 @@ do {
       precondition(after.isEmpty)
     }
   }
+  check("PLA heat lowers viscosity; fan accelerates cooling") {
+    var m = PLAMaterial()
+    precondition(m.viscosity(230) < m.viscosity(190))
+    let forced = m.cooled(210, dt: 2)
+    m.fan = 0
+    precondition(m.cooled(210, dt: 2) > forced)
+    precondition(m.hardness(50) == 1 && m.hardness(210) == 0)
+  }
+  check("Spaghetti remains bounded above the plate and responds to gravity") {
+    var rope = Spaghetti()
+    for i in 0..<180 { rope.advance(dt: 1/60, nozzle: SIMD3(Float(i) * 0.08, 20, 0), emitting: true) }
+    precondition(rope.points.count > 5 && rope.points.count <= 1200)
+    precondition(rope.points.allSatisfy { $0.x.isFinite && $0.y >= 0.22 && $0.z.isFinite })
+    let before = rope.points[0].y
+    for _ in 0..<120 { rope.advance(dt: 1/60, nozzle: .zero, emitting: false) }
+    precondition(rope.points[0].y <= before)
+  }
+  try check("Spaghetti retains emitted colors, lands on objects and hardens") {
+    var rope = Spaghetti()
+    let file = try GCodeParser.parse("G90\nM83\n; CHANGE_LAYER\nG1 X-5 Z10\nG1 X5 E1 F60")
+    rope.setObstacle(file.moves, through: file.duration)
+    let red = SIMD4<Float>(1,0,0,1), blue = SIMD4<Float>(0,0,1,1)
+    for _ in 0..<30 { rope.advance(dt: 1/60, nozzle: SIMD3(0,12,0), emitting: true, color:red) }
+    for _ in 0..<30 { rope.advance(dt: 1/60, nozzle: SIMD3(0,12,0), emitting: true, color:blue) }
+    precondition(rope.colors.first == red && rope.colors.last == blue)
+    for _ in 0..<360 { rope.advance(dt: 1/60, nozzle: .zero, emitting: false) }
+    precondition(rope.points.contains { $0.y > 9 })
+    let frozen = rope.points
+    for _ in 0..<60 { rope.advance(dt: 1/60, nozzle: .zero, emitting: false) }
+    precondition(rope.points == frozen)
+  }
+  check("Spaghetti keeps emitting after capacity and preserves array alignment") {
+    var rope = Spaghetti()
+    for _ in 0..<2100 { rope.advance(dt: 1/60, nozzle: SIMD3(0,5,0), emitting: true) }
+    let red = SIMD4<Float>(1,0,0,1)
+    for _ in 0..<5 { rope.advance(dt: 1/60, nozzle: SIMD3(20,5,0), emitting: true, color: red) }
+    precondition(rope.points.count == 1200)
+    precondition(rope.colors.count == rope.points.count && rope.temperatures.count == rope.points.count)
+    precondition(rope.colors.last == red && rope.points.last!.x == 20)
+    precondition(rope.points.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite })
+  }
+  check("Contact friction removes tangential motion without reversing it") {
+    let velocity = SIMD3<Float>(2,-1,0), normal = SIMD3<Float>(0,1,0)
+    let smooth = Spaghetti.frictionVelocity(velocity,normal:normal,load:1,coefficient:0)
+    let rough = Spaghetti.frictionVelocity(velocity,normal:normal,load:1,coefficient:0.6)
+    precondition(rough.x > 0 && rough.x < smooth.x && rough.y == 0)
+    precondition(Spaghetti.frictionVelocity(velocity,normal:normal,load:10,coefficient:1) == .zero)
+  }
+  check("Molten strand settles without bouncing from plate contact") {
+    var strand = Spaghetti()
+    strand.material.fan = 0
+    strand.advance(dt: 0.01, nozzle: SIMD3(0,0.6,0), emitting: true)
+    var landed = false
+    for _ in 0..<240 {
+      strand.advance(dt: 1/120, nozzle: .zero, emitting: false)
+      let height = strand.points[0].y
+      if height <= 0.221 { landed = true }
+      if landed { precondition(height <= 0.221) }
+    }
+    precondition(landed)
+  }
   if let path = CommandLine.arguments.dropFirst().first {
     try check("Metal shader compiles on the real GPU") {
       guard let device = MTLCreateSystemDefaultDevice() else {
@@ -310,6 +371,22 @@ do {
       }
       let lib = try device.makeLibrary(
         source: String(contentsOfFile: path, encoding: .utf8), options: nil)
+      let contact = try device.makeComputePipelineState(function: lib.makeFunction(name: "filamentContacts")!)
+      let nodes: [SIMD4<Float>] = [SIMD4(-1,5,0,1),SIMD4(1,5,0,1),SIMD4(5,5,5,0),SIMD4(6,5,5,0),SIMD4(0,5,-1,0),SIMD4(0,5,1,0)]
+      let input = nodes.withUnsafeBytes { device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)! }
+      let output = device.makeBuffer(length: nodes.count*16)!
+      let command = device.makeCommandQueue()!.makeCommandBuffer()!
+      let encoder = command.makeComputeCommandEncoder()!
+      var n = UInt32(nodes.count)
+      encoder.setComputePipelineState(contact)
+      encoder.setBuffer(input, offset: 0, index: 0); encoder.setBuffer(output, offset: 0, index: 1)
+      encoder.setBytes(&n, length: 4, index: 2)
+      encoder.dispatchThreads(MTLSize(width: nodes.count,height: 1,depth: 1), threadsPerThreadgroup: MTLSize(width: 6,height: 1,depth: 1))
+      encoder.endEncoding(); command.commit(); command.waitUntilCompleted()
+      precondition(command.status == .completed)
+      let contacts = output.contents().bindMemory(to: SIMD4<Float>.self, capacity: nodes.count)
+      precondition(contacts[0].y > nodes[0].y && contacts[1].y > nodes[1].y)
+      precondition(contacts[4] == nodes[4] && contacts[5] == nodes[5])
       precondition(
         lib.makeFunction(name: "bead") != nil && lib.makeFunction(name: "shaded") != nil
           && lib.makeFunction(name: "ribbon") != nil && lib.makeFunction(name: "toolhead") != nil

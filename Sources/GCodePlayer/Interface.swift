@@ -71,6 +71,8 @@ struct ContentView: View {
       Spacer(minLength: 10)
       pill("terminal", "G-Code", active: player.showCode) { player.showCode.toggle() }
       pill("drop", "Melt", active: player.melt) { player.melt.toggle() }
+      pill("scribble", "モジャ", active: player.moja) { player.moja.toggle() }
+        .disabled(player.file == nil)
       Menu {
         Toggle("Show approximate head envelope", isOn: $player.showClearance)
         Button(player.checkingClearance ? "Checking…" : "Check deposited-material clearance") {
@@ -100,6 +102,31 @@ struct ContentView: View {
         Label("Detail", systemImage: "cube").font(.system(size: 10, weight: .medium))
       }.menuStyle(.borderlessButton).fixedSize().padding(.horizontal, 10).padding(.vertical, 8)
         .background(.white.opacity(0.04), in: Capsule())
+      Button { player.environmentOpen.toggle() } label: {
+        Label("Environment", systemImage: "thermometer.medium")
+          .font(.system(size: 10, weight: .medium))
+      }.buttonStyle(.plain).popover(isPresented: $player.environmentOpen) {
+        VStack(alignment: .leading) {
+          Text("PLA · SIMULATED ENVIRONMENT")
+          Text("Nozzle: \(Int(player.nozzleTemperature)) °C")
+          Slider(value: $player.nozzleTemperature, in: 170...250)
+          Text("Cooling fan: \(Int(player.coolingFan*100)) %")
+          Slider(value: $player.coolingFan, in: 0...1)
+          Text(String(format: "Relative viscosity: ×%.2f", player.viscosityScale))
+          Slider(value: $player.viscosityScale, in: 0.25...4)
+          Text(String(format: "Contact friction: %.2f", player.contactFriction))
+          Slider(value: $player.contactFriction, in: 0...1.2)
+          Text("Qualitative model · not measured rheology").font(.caption2).foregroundStyle(.secondary)
+          Text("Plate: \(Int(player.plateTemperature)) °C")
+          Slider(value: $player.plateTemperature, in: 0...110)
+          Text("Ambient: \(Int(player.roomTemperature)) °C")
+          Slider(value: $player.roomTemperature, in: 5...45)
+          Text("Humidity: \(Int(player.humidity)) %")
+          Slider(value: $player.humidity, in: 0...100)
+          Gauge(value: player.peelRisk) { Text("Peeling tendency (approx.)") }
+          Toggle("Simulate adhesion failure", isOn: $player.simulateAdhesion)
+        }.padding(12).frame(width: 240)
+      }
       Menu {
         Toggle("Shadows", isOn: $player.shadows)
         Picker("Shadow map", selection: $player.shadowResolution) {
