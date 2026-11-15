@@ -18,8 +18,8 @@ cat > "$native_app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>com.goroman.null-gcode-player-macos</string>
 <key>CFBundleExecutable</key><string>NullGCodePlayer</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.0</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>0.10</string>
+<key>CFBundleVersion</key><string>10</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>CFBundleDocumentTypes</key><array><dict><key>CFBundleTypeName</key><string>Bambu Studio G-Code</string><key>CFBundleTypeRole</key><string>Viewer</string><key>LSItemContentTypes</key><array><string>public.data</string></array><key>CFBundleTypeExtensions</key><array><string>gcode</string><string>gco</string><string>gc</string><string>3mf</string><string>zip</string></array></dict></array>

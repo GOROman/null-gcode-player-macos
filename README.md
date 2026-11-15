@@ -1,10 +1,14 @@
-# NULL G-Code Player for macOS
+# NULL G-Code Player for macOS — v0.10
 
 A native Swift + Metal G-Code player, built for fast local previews on Apple Silicon. No WebView, browser, Electron, or JavaScript runtime is involved.
 
 This is the independent native implementation of [NULL G-Code Player](https://github.com/GOROman/null-gcode-player), focused on rendering speed. Karaoke, music synchronization, pachislot cut-ins, automatic race cameras, and mechanical tool docking from the web version have not yet been ported.
 
 ![Native Metal preview with Bambu filament colors](docs/metal-preview.png)
+
+## Download
+
+Download the Apple Silicon app from the [v0.10 release](https://github.com/GOROman/null-gcode-player-macos/releases/tag/v0.10), unzip it, and move **NULL G-Code Player.app** to Applications. Requires macOS 14 or newer. The release is ad-hoc signed and is not notarized.
 
 ## Build and launch
 
@@ -91,6 +95,8 @@ Created by GOROman.
 
 
 ### Nonplanar air-pixel experiment and head clearance
+
+![Native head clearance preview](docs/head-clearance.png)
 
 `samples/air-pixel-heart.gcode` is a **preview-only**, anchored, vertical 27-pixel
 heart. Generate it with `python3 scripts/generate-air-pixels.py`. All seven stems
