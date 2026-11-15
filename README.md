@@ -1,27 +1,37 @@
 # NULL G-Code Player for macOS
 
-A fast, native **Swift + Metal** viewer for Bambu Studio G-Code on Apple Silicon.
+**See every layer. Follow every color. Watch your print take shape.**
+
+Drop in a sliced file from Bambu Studio, press Play, and watch your model grow
+from its first line of filament. Circle around it, get close to the nozzle,
+or skip ahead to see how it all comes together.
+
+Pause on a detail. Replay a color change. Turn a long print into a few minutes
+of discovery—all on your Mac, without uploading your files.
 
 ![Native Metal preview](docs/metal-preview.png)
 
 ## Download
 
-[Download v0.10](https://github.com/GOROman/null-gcode-player-macos/releases/tag/v0.10) · [Web version](https://github.com/GOROman/null-gcode-player)
+[Download v0.10](https://github.com/GOROman/null-gcode-player-macos/releases/tag/v0.10)
 
 Requires **macOS 14+ and Apple Silicon**. Unzip the app and move it to Applications.
 The app is ad-hoc signed and not notarized.
 
-## Features
+## Explore your print
 
-- Real-time 3D playback, pause, step, seek, and speeds up to **100×**.
-- Bambu filament colors, rotating spools, and tool-change counts.
-- Lighting, shadows, antialiasing, and automatic level of detail.
-- Live G-Code overlay and CPU/GPU rendering statistics.
-- Approximate head-clearance checks.
-- **モジャ (Moja)**: experimental filament failure with GPU contacts, friction, cooling, and hardening. Adjust temperature, humidity, and relative PLA viscosity in **Environment**.
+- **Watch it grow.** Follow the nozzle as it builds your model, layer by layer.
+- **Find your angle.** Rotate freely, zoom into the fine details, or enjoy the whole print in fullscreen.
+- **See your colors come together.** Preview Bambu Studio's filament colors and watch the spools turn as material is used.
+- **Take control of time.** Pause, step through a move, drag the timeline, or fast-forward up to **100×**.
+- **Look closer.** Reveal the G-Code behind each movement or inspect potential head-clearance issues.
 
-Moja is available in the latest source build, after v0.10. Physics and clearance
-checks are visual approximations, not predictions of real printing behavior.
+Feeling experimental? **モジャ (Moja)** turns new extrusion into tangled strands
+that fall, collide, and harden. Try different temperatures and cooling settings
+in **Environment** to explore how the effect changes. Available in the latest
+source build, after v0.10.
+
+Physics and clearance checks are visual approximations, not predictions of real printing behavior.
 
 ## Use
 
@@ -59,7 +69,7 @@ NULL_TEST_GPU=1 ./scripts/check.sh
 ```
 
 The preview clock uses commanded movement speeds; heating, acceleration, and
-cooling waits are not simulated. Music and karaoke are available in the web version.
+cooling waits are not simulated.
 
 ## License
 
